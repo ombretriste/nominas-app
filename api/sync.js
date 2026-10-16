@@ -18,8 +18,21 @@
 // Todas las claves empiezan por «nom:», así que puede compartir base de datos con UnderCTRL («nom:»)
 // sin mezclarse. La clave de registro es la misma que la de UnderCTRL.
 
-const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+// Variables de la base de datos. Al conectar Upstash a un segundo proyecto, Vercel puede ponerles
+// un prefijo propio (p. ej. NOMINAS_KV_REST_API_URL o STORAGE_REST_API_URL), así que se busca
+// cualquier par …REST_API_URL / …REST_API_TOKEN (o …REDIS_REST_URL / …REDIS_REST_TOKEN).
+function findRedisEnv(env = process.env) {
+  const known = [['KV_REST_API_URL', 'KV_REST_API_TOKEN'], ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']];
+  for (const [u, t] of known) if (env[u] && env[t]) return { url: env[u], token: env[t] };
+  for (const k of Object.keys(env)) {
+    const m = k.match(/^(.*)(REST_API_URL|REDIS_REST_URL)$/);
+    if (!m || !/^https:\/\//.test(env[k] || '')) continue;
+    const tk = m[1] + m[2].replace('URL', 'TOKEN');
+    if (env[tk]) return { url: env[k], token: env[tk] };
+  }
+  return { url: null, token: null };
+}
+const { url: REDIS_URL, token: REDIS_TOKEN } = findRedisEnv();
 const MAX_BLOB = 2 * 1024 * 1024;
 const MAX_FILE = 3 * 1024 * 1024; // cada PDF cifrado (en base64)
 const FILE_ID = /^[a-z0-9]{6,40}$/;
@@ -67,6 +80,14 @@ function sameHex(a, b) {
 
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  // Comprobación (abrir /api/sync en el navegador): dice si hay base de datos y qué variables
+  // de base de datos ve el servidor (solo los nombres, nunca sus valores).
+  if (req.method === 'GET') {
+    return res.status(200).json({
+      configured: !!(REDIS_URL && REDIS_TOKEN),
+      vars: Object.keys(process.env).filter((k) => /KV|REDIS|UPSTASH|REST_API/.test(k)).sort(),
+    });
+  }
   if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
   if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: 'not-configured' });
 
