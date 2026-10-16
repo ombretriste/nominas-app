@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.3.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -32,6 +32,8 @@ const ICONS = {
   documents: '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2h7a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   renta: '<path d="M6 3.5h12v17l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3-2 1.3z"/><path d="M9 8h6M9 11.5h6M9 15h3.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  cloud: '<path d="M7 18a4.5 4.5 0 0 1-.5-9A6 6 0 0 1 18 9.5a4 4 0 0 1-.5 8.5z"/><path d="M12 11v5M9.5 13.5L12 11l2.5 2.5"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
   chevron: '<path d="M9 6l6 6-6 6"/>',
   down: '<path d="M6 9l6 6 6-6"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
@@ -282,6 +284,91 @@ async function readPayslipPdf(file) {
     concepts,
   };
 }
+// ---------- Certificado de retenciones (modelo de la AEAT) ----------
+// Lo da la empresa cada año para la Renta. Se guardan sus casillas y se comparan con la suma
+// de las nóminas de ese ejercicio.
+function normCert(c) {
+  const n = (v) => Number(v) || 0;
+  return {
+    id: c.id || uid(),
+    year: Number(c.year) || new Date().getFullYear() - 1,
+    company: c.company || '',
+    gross: n(c.gross),          // retribuciones dinerarias: importe íntegro satisfecho
+    ret: n(c.ret),              // retenciones practicadas
+    especie: n(c.especie),      // retribuciones en especie: valoración
+    iac: n(c.iac),              // ingresos a cuenta efectuados
+    iacRep: n(c.iacRep),        // ingresos a cuenta repercutidos
+    pp: n(c.pp),                // contribuciones empresariales a planes de pensiones
+    ss: n(c.ss),                // gastos deducibles (cotizaciones a la Seguridad Social)
+    exentas: n(c.exentas),      // rentas exentas (mod. 190)
+    dietas: n(c.dietas),        // dietas exceptuadas de gravamen
+    arrears: Array.isArray(c.arrears) ? c.arrears.map((a) => ({ year: Number(a.year) || 0, gross: n(a.gross), ret: n(a.ret) })) : [],
+    file: c.file && c.file.id ? { id: c.file.id, name: c.file.name || 'certificado', type: c.file.type || '', size: Number(c.file.size) || 0 } : null,
+  };
+}
+
+async function pdfText(file) {
+  const lib = await loadPdfJs();
+  const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = '';
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n);
+    text += ' ' + (await page.getTextContent()).items.map((it) => it.str).join(' ');
+  }
+  return text.replace(/\s+/g, ' ');
+}
+
+// Devuelve las casillas del certificado o null si el PDF no es un certificado de retenciones.
+async function readCertPdf(file) {
+  const t = await pdfText(file);
+  if (!/Certificado de retenciones/i.test(t)) return null;
+  const AMT = '(\\d{1,3}(?:\\.\\d{3})*,\\d{2})';
+  // Importes que siguen a una etiqueta (tras los puntos de relleno), hasta `max`
+  const after = (label, max = 1) => {
+    const lm = t.match(label);
+    if (!lm) return [];
+    // Tras la etiqueta: se salta el texto hasta los puntos de relleno (si los hay)
+    let rest = t.slice(lm.index + lm[0].length);
+    if (!/^[\s.]*\d/.test(rest)) rest = rest.replace(/^.*?\.{3,}/, '');
+    const m = rest.match(new RegExp(`^[\\s.]*${AMT}(?:\\s+${AMT})?(?:\\s+${AMT})?`));
+    return m ? m.slice(1, 1 + max).filter(Boolean).map(parseAmount) : [];
+  };
+  const [gross = 0, ret = 0] = after(/Retribuciones dinerarias/, 2);
+  const [especie = 0, iac = 0, iacRep = 0] = after(/Retribuciones en especie/, 3);
+  const [pp = 0] = after(/excepto a seguros colectivos de dependencia\)/);
+  const [ss = 0] = after(/Gastos fiscalmente deducibles/);
+  const [exentas = 0] = after(/\(mod\. 190\)/);
+  const [dietas = 0] = after(/cuantías exceptuadas de gravamen del IRPF/);
+  // Atrasos: filas «ejercicio importe retención» entre su cabecera y la nota informativa
+  const a0 = t.search(/Ejercicio de devengo/);
+  const a1 = t.search(/Información de interés para el perceptor\.- La percepción/);
+  const arrears = [];
+  if (a0 >= 0 && a1 > a0) {
+    for (const m of t.slice(a0, a1).matchAll(new RegExp(`\\b(20\\d{2})\\s+${AMT}(?:\\s+${AMT})?`, 'g'))) {
+      arrears.push({ year: Number(m[1]), gross: parseAmount(m[2]), ret: m[3] ? parseAmount(m[3]) : 0 });
+    }
+  }
+  const year = Number(t.match(/correspondientes al ejercicio (\d{4})/i)?.[1]) || null;
+  const company = t.match(/entidad pagadora .*?razón social [A-Z]\d{7}[A-Z0-9] (.+?) • /)?.[1]?.trim() || '';
+  return { year, company: prettyCompany(company), gross, ret, especie, iac, iacRep, pp, ss, exentas, dietas, arrears };
+}
+const prettyCompany = (s) => (/[a-z]/.test(s) ? s : s.toLowerCase().replace(/(^|[\s(])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()).replace(/\bS\.a\./i, 'S.A.').replace(/\bS\.l\./i, 'S.L.').replace(/\b(And|Of|De|Del|Y)\b/g, (w) => w.toLowerCase()));
+
+// Comparación certificado ↔ nóminas del mismo año. strict: deben coincidir (margen de 1 €);
+// el resto son informativos (la empresa valora la especie y las rentas exentas con criterio fiscal).
+function certCheck(cert, slips) {
+  const r = rentaData(slips);
+  const rows = [
+    { label: 'Retribuciones dinerarias', slips: r.gross, cert: cert.gross, strict: true },
+    { label: 'Retenciones de IRPF', slips: r.irpf, cert: cert.ret, strict: true },
+    { label: 'Cotizaciones a la Seguridad Social', slips: r.ss, cert: cert.ss, strict: true, note: 'Gastos deducibles' },
+    { label: 'Aportación de la empresa al plan de pensiones', slips: r.ppCo, cert: cert.pp, strict: true },
+    { label: 'Especie + rentas exentas', slips: r.especie, cert: cert.especie + cert.exentas, strict: false, note: 'Orientativo: comedor, seguros y acciones' },
+  ];
+  rows.forEach((x) => { x.diff = round2(x.slips - x.cert); x.ok = Math.abs(x.diff) < 1; });
+  return { rows, ok: rows.filter((x) => x.strict).every((x) => x.ok), count: slips.length };
+}
+
 function normData(d) {
   const profiles = Array.isArray(d?.profiles) && d.profiles.length ? d.profiles : [{ name: 'Yo' }];
   return {
@@ -290,6 +377,7 @@ function normData(d) {
       name: p.name || `Persona ${i + 1}`,
       color: p.color || PROFILE_COLORS[i % PROFILE_COLORS.length],
       slips: (p.slips || []).map(normSlip),
+      certs: (p.certs || []).map(normCert),
     })),
   };
 }
@@ -306,6 +394,7 @@ const openYears = new Set([String(new Date().getFullYear())]);
 const undoStack = [];
 function persist() {
   save(STORAGE_KEY, data);
+  markDirty(); // se sube a la nube si la sincronización está activa
 }
 function trackUndo() {
   undoStack.push(JSON.stringify(data));
@@ -369,9 +458,16 @@ const allSlips = (profiles = viewProfiles()) => profiles.flatMap((p) => p.slips.
 const slipsOfYear = (year, profiles) => allSlips(profiles).filter((s) => s.year === year);
 const sortSlips = (arr) => [...arr].sort((a, b) => b.year - a.year || b.month - a.month || (a.kind === 'monthly' ? 1 : -1));
 function yearsWithData(profiles = viewProfiles()) {
-  const ys = new Set(allSlips(profiles).map((s) => s.year));
+  const ys = new Set([...allSlips(profiles).map((s) => s.year), ...profiles.flatMap((p) => p.certs.map((c) => c.year))]);
   ys.add(new Date().getFullYear());
   return [...ys].sort((a, b) => b - a);
+}
+function findCert(id) {
+  for (const p of data.profiles) {
+    const c = p.certs.find((x) => x.id === id);
+    if (c) return { c, p };
+  }
+  return null;
 }
 function findSlip(id) {
   for (const p of data.profiles) {
@@ -523,6 +619,7 @@ async function unlock() {
   if (!session.get() && !(await authenticate())) return false;
   unlocked = true;
   session.mark();
+  syncNow();
   return true;
 }
 
@@ -589,10 +686,19 @@ async function changeSecurity(next, changePin = false) {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!unlocked) return;
-  if (document.hidden) session.mark();
-  else if (session.get() || effectiveLevel() === 'none') session.mark();
-  else lockApp();
+  if (!unlocked) {
+    if (!document.hidden && sync) syncNow(); // en la pantalla de entrada también se trae lo nuevo
+    return;
+  }
+  if (document.hidden) {
+    session.mark(); // hora en que se salió de la app
+    if (sync?.dirty) syncNow(); // sube lo pendiente antes de salir
+  } else if (session.get() || effectiveLevel() === 'none') {
+    session.mark();
+    syncNow();
+  } else {
+    lockApp();
+  }
 });
 
 // ---------- Navegación ----------
@@ -684,6 +790,7 @@ function swapView(el, dir) {
 const MENU = [
   { label: 'Administrar perfiles', icon: 'users', run: () => openProfilesSheet() },
   { label: 'Opciones de visualización', icon: 'palette', run: () => openDisplaySheet() },
+  { label: 'Sincronización en la nube', icon: 'cloud', run: () => openSyncSheet() },
   { label: 'Importar/exportar copia', icon: 'swap', run: () => openBackupSheet() },
   { label: 'Nivel de seguridad', icon: 'shield', run: () => openSecuritySheet() },
   { label: 'Bloquear', icon: 'lock', run: () => lockApp() },
@@ -906,17 +1013,28 @@ function openProfilesSheet() {
 }
 
 // ---------- Resumen ----------
+// Todos los años con datos, del más antiguo (izquierda) al más reciente (derecha). Caben 4 a la
+// vista; la barra se desliza para ver los anteriores y se abre colocada en el año elegido.
 function yearSelector() {
-  const ys = yearsWithData().slice(0, 4);
-  if (!ys.includes(selYear)) selYear = ys[0];
-  return `<div class="seg full year-seg" role="group" aria-label="Año">${ys.map((y) =>
+  const ys = yearsWithData().sort((a, b) => a - b);
+  if (!ys.includes(selYear)) selYear = ys.at(-1);
+  return `<div class="seg full year-seg ${ys.length > 4 ? 'scrolls' : ''}" role="group" aria-label="Año">${ys.map((y) =>
     `<button type="button" data-year="${y}" class="${y === selYear ? 'on' : ''}">${y}</button>`).join('')}</div>`;
 }
+let yearSegScroll = null; // posición de la barra, para que no salte al cambiar de año
 function bindYearSelector(el) {
+  const seg = el.querySelector('.year-seg');
   el.querySelectorAll('[data-year]').forEach((b) => b.addEventListener('click', () => {
     selYear = Number(b.dataset.year);
+    yearSegScroll = seg.scrollLeft;
     render();
   }));
+  if (!seg?.classList.contains('scrolls')) return;
+  requestAnimationFrame(() => {
+    const on = seg.querySelector('.on');
+    if (yearSegScroll != null) { seg.scrollLeft = yearSegScroll; yearSegScroll = null; }
+    else if (on) seg.scrollLeft = on.offsetLeft + on.offsetWidth - seg.clientWidth + 3;
+  });
 }
 function splitBar(t) {
   if (isPrivate() || t.gross <= 0) return '';
@@ -933,11 +1051,15 @@ function renderSummary() {
   const slips = slipsOfYear(selYear, profiles);
   const t = aggregate(slips);
   const months = new Set(slips.map((s) => s.month)).size;
-  const docs = allSlips(profiles).filter((s) => s.file).length;
+  const docs = allSlips(profiles).filter((s) => s.file).length + profiles.flatMap((p) => p.certs).filter((c) => c.file).length;
   const blockValue = {
     payslips: money(t.net),
     concepts: '',
-    renta: '',
+    renta: (() => {
+      const pairs = profiles.flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certCheck(c, p.slips.filter((x) => x.year === selYear))));
+      if (!pairs.length) return '';
+      return pairs.every((x) => x.ok) ? `<span class="pos small-status">${icon('check', 14)} cuadra</span>` : '<span class="neg small-status">no cuadra</span>';
+    })(),
     evolution: '',
     documents: `<span class="muted">${docs}</span>`,
   };
@@ -1070,13 +1192,15 @@ const CATALOG = {
   // Abonos
   '0080': { name: 'Salario base' },
   '0100': { name: 'Antigüedad (quinquenios)' },
-  '0096': { name: 'Antigüedad de la paga extra' },
+  '0096': { name: 'Antigüedad de la paga de julio' },
   '2770': { name: 'Ajuste por incremento del seguro de vida' },
   '2193': { name: 'Importe a cuenta' },
   '2142': { name: 'Complemento por resultado' },
   '214D': { name: 'Complemento por resultado (paga de Navidad)' },
   '214J': { name: 'Complemento por resultado (paga de julio)' },
   '0414': { name: 'Gratificación de julio (paga extra)' },
+  '0418': { name: 'Gratificación de Navidad (paga extra)' },
+  '0098': { name: 'Antigüedad de la paga de Navidad' },
   '5516': { name: 'Horas de conflicto laboral' },
   '5599': { name: 'Horas de conflicto laboral (no cotizan)' },
   '0500': { name: 'Descuento de horas de falta en la paga extra' },
@@ -1099,6 +1223,7 @@ const CATALOG = {
   '3310': { name: 'Acciones', especie: true },
   '3352': { name: 'Aportación de la empresa al plan de pensiones', especie: true, renta: 'ppCo' },
   '3354': { name: 'Reparto lineal' },
+  '3992': { name: 'Especie no repercutida', especie: true },
   '777E': { name: 'Seguro médico de empresa', especie: true },
   '778E': { name: 'Seguro médico (base de Seguridad Social)' },
   // Empresa
@@ -1234,7 +1359,7 @@ function renderSlip(s, p) {
     <button class="link-btn-text danger slip-del" type="button">Eliminar esta nómina</button>`;
   bindFolds(el);
   el.querySelector('.slip-edit').addEventListener('click', () => openSlipSheet(s, p));
-  el.querySelector('[data-file]')?.addEventListener('click', () => openFile(s));
+  el.querySelector('[data-file]')?.addEventListener('click', () => openFile(s.file, slipTitle(s)));
   el.querySelector('.slip-del').addEventListener('click', async () => {
     if (!(await confirmSheet('Eliminar nómina', `Se borrará la nómina de ${esc(slipTitle(s))}. Se puede deshacer.`))) return;
     change(() => { p.slips = p.slips.filter((x) => x.id !== s.id); });
@@ -1248,12 +1373,26 @@ function renderSlip(s, p) {
 // Si un archivo no se puede leer (una foto, otro formato), se abre el formulario para meterla a mano.
 async function importFiles(fileList, owner) {
   const list = [...fileList];
-  const done = [], skipped = [], manual = [];
-  showToast(`Leyendo ${list.length === 1 ? 'la nómina' : `${list.length} nóminas`}…`);
+  const done = [], skipped = [], manual = [], certsDone = [];
+  showToast(`Leyendo ${list.length === 1 ? 'el archivo' : `${list.length} archivos`}…`);
   const parsed = [];
   for (const f of list) {
     let r = null;
     if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+      // ¿Certificado de retenciones? Se guarda en su año (sustituye al que hubiera).
+      try {
+        const c = await readCertPdf(f);
+        if (c?.year) {
+          const id = uid();
+          await files.put(id, f);
+          change(() => {
+            owner.certs = owner.certs.filter((x) => x.year !== c.year);
+            owner.certs.push(normCert({ ...c, file: { id, name: f.name, type: f.type || 'application/pdf', size: f.size } }));
+          });
+          certsDone.push(c.year);
+          continue;
+        }
+      } catch (e) { console.warn(e); }
       try { r = await readPayslipPdf(f); } catch (e) { console.warn(e); }
     }
     if (!r || !r.year || !r.month) { manual.push(f); continue; }
@@ -1285,6 +1424,7 @@ async function importFiles(fileList, owner) {
   }
   const msg = [
     done.length ? `${done.length === 1 ? 'Nómina guardada' : `${done.length} nóminas guardadas`}` : '',
+    certsDone.length ? `certificado ${certsDone.join(', ')} guardado` : '',
     skipped.length ? `ya estaban: ${skipped.join(', ')}` : '',
   ].filter(Boolean).join(' · ');
   if (msg) showToast(msg, { warn: !done.length });
@@ -1293,7 +1433,10 @@ async function importFiles(fileList, owner) {
   } else if (manual.length > 1) {
     showToast(`${manual.length} archivos no se pudieron leer: ${manual.map((f) => f.name).join(', ')}. Súbelos de uno en uno para meterlos a mano.`, { warn: true });
   }
-  if (done.length === 1 && !manual.length) go(`slip:${done[0].id}`, 'forward');
+  if (certsDone.length && !done.length) {
+    selYear = certsDone[0];
+    go('renta', screen === 'renta' ? null : 'forward');
+  } else if (done.length === 1 && !manual.length) go(`slip:${done[0].id}`, 'forward');
   else if (done.length) go('payslips', screen === 'payslips' ? null : 'forward');
 }
 
@@ -1308,10 +1451,10 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
     <div class="sheet" role="dialog" aria-modal="true" aria-label="${existing ? 'Editar nómina' : 'Subir nóminas'}">
       <h2 class="sheet-title">${existing ? 'Editar nómina' : pendingFile ? 'Nómina a mano' : 'Subir nóminas'}</h2>
       ${existing || pendingFile ? '' : `
-      <label class="add-btn file-pick main-pick">${icon('upload', 18)} <span>Elegir PDF de nóminas</span>
+      <label class="add-btn file-pick main-pick">${icon('upload', 18)} <span>Elegir PDF de nóminas o certificados</span>
         <input type="file" class="multi-pick" accept="application/pdf,image/*" multiple hidden>
       </label>
-      <p class="muted small">Puedes elegir varias a la vez: se leen solas (mes, paga extra, empresa y todos los conceptos). Si alguna no se puede leer, podrás meterla a mano.</p>
+      <p class="muted small">Puedes elegir varios a la vez: se leen solos (mes, paga extra, empresa y todos los conceptos). El certificado de retenciones de la Renta también se reconoce y va a su año. Si alguno no se puede leer, podrás meterlo a mano.</p>
       <p class="opt-label">O a mano</p>`}
       ${pendingFile ? `<p class="muted small">No se ha podido leer «${esc(pendingFile.name)}». Rellena los importes y se guardará con el archivo.</p>` : ''}
       ${existing ? `
@@ -1394,24 +1537,25 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
 
 // ---------- Visor del documento ----------
 let viewerUrl = null;
-async function openFile(s) {
+// ref: { id, name, type } del archivo; title: lo que se ve arriba del visor.
+async function openFile(ref, title) {
   let blob = null;
-  try { blob = await files.get(s.file.id); } catch {}
+  try { blob = await files.get(ref.id); } catch {}
   if (!blob) return showToast('El archivo no está en este dispositivo.', { warn: true });
   closeViewer();
   viewerUrl = URL.createObjectURL(blob);
-  const isImg = (s.file.type || blob.type).startsWith('image/');
+  const isImg = (ref.type || blob.type).startsWith('image/');
   const v = document.createElement('div');
   v.className = 'sheet-backdrop doc-viewer';
   v.innerHTML = `
-    <div class="sheet doc-sheet" role="dialog" aria-modal="true" aria-label="${esc(s.file.name)}">
+    <div class="sheet doc-sheet" role="dialog" aria-modal="true" aria-label="${esc(ref.name)}">
       <div class="doc-head">
-        <h2 class="sheet-title">${esc(slipTitle(s))}</h2>
+        <h2 class="sheet-title">${esc(title)}</h2>
         <button class="icon-btn doc-close" type="button" aria-label="Cerrar">${icon('plus', 20).replace('M12 5v14M5 12h14', 'M6 6l12 12M18 6L6 18')}</button>
       </div>
-      <div class="doc-body">${isImg ? `<img src="${viewerUrl}" alt="${esc(s.file.name)}">` : `<iframe src="${viewerUrl}" title="${esc(s.file.name)}"></iframe>`}</div>
+      <div class="doc-body">${isImg ? `<img src="${viewerUrl}" alt="${esc(ref.name)}">` : `<iframe src="${viewerUrl}" title="${esc(ref.name)}"></iframe>`}</div>
       <div class="body-actions">
-        <a class="text-btn" href="${viewerUrl}" download="${esc(s.file.name)}">Descargar</a>
+        <a class="text-btn" href="${viewerUrl}" download="${esc(ref.name)}">Descargar</a>
         <a class="text-btn done-btn" href="${viewerUrl}" target="_blank" rel="noopener">Abrir</a>
       </div>
     </div>`;
@@ -1491,6 +1635,47 @@ function rentaData(slips) {
     arrearsTotal: sumBy(prevYears, (k) => k.amount),
   };
 }
+// Certificado del año frente a las nóminas de esa persona: casilla a casilla, con la diferencia.
+function certSection(p, cert) {
+  const slips = p.slips.filter((s) => s.year === cert.year);
+  const chk = certCheck(cert, slips);
+  const who = data.profiles.length > 1 ? ` · ${esc(p.name)}` : '';
+  const status = !chk.count
+    ? `<p class="small warn-line">No hay nóminas de ${cert.year}: súbelas para comprobar el certificado.</p>`
+    : chk.ok
+      ? `<p class="small ok-line">${icon('check', 14)} Cuadra con tus ${chk.count} nóminas de ${cert.year}</p>`
+      : `<p class="small warn-line">No cuadra con tus ${chk.count} nóminas: revisa las diferencias${slips.length < 12 ? ` (¿falta alguna nómina? hay ${new Set(slips.filter((s) => s.kind === 'monthly').map((s) => s.month)).size} de 12 meses)` : ''}.</p>`;
+  const cell = (v) => `<span>${numStr2(v)}</span>`;
+  return `
+    <section class="group cert-group">
+      <h2>Certificado de retenciones ${cert.year}${who}</h2>
+      <div class="list cert-card">
+        <div class="cert-head">
+          <span class="cert-co">${esc(cert.company || 'Empresa')}</span>
+          ${status}
+        </div>
+        ${chk.count ? `
+        <div class="amort-cols cert-cols"><span>Concepto</span><span>Nóminas</span><span>Certificado</span><span>Dif.</span></div>
+        ${chk.rows.map((x) => `
+        <div class="amort-row cert-cols ${x.strict ? '' : 'soft'}">
+          <span class="cc-label">${esc(x.label)}${x.note ? `<small class="muted">${esc(x.note)}</small>` : ''}</span>
+          ${cell(x.slips)}${cell(x.cert)}
+          <span class="${x.ok ? 'pos' : x.strict ? 'neg' : 'muted'}">${x.ok ? icon('check', 13) : (x.diff > 0 ? '+' : '') + numStr2(x.diff)}</span>
+        </div>`).join('')}` : ''}
+        <div class="cert-extra">
+          ${[['Retribuciones en especie (valoración)', cert.especie], ['Ingresos a cuenta efectuados', cert.iac], ['Ingresos a cuenta repercutidos', cert.iacRep],
+            ['Rentas exentas', cert.exentas], ['Dietas exceptuadas de gravamen', cert.dietas]].filter(([, v]) => v).map(([l, v]) =>
+            `<div class="cat-row"><span class="cat-name">${l}</span><span class="amount">${money(v)}</span></div>`).join('')}
+          ${cert.arrears.map((a) => `<div class="cat-row"><span class="cat-name">Atrasos de ${a.year}<small class="muted">Retención ${money(a.ret)}</small></span><span class="amount">${money(a.gross)}</span></div>`).join('')}
+        </div>
+        <div class="cert-actions">
+          ${cert.file ? `<button class="link-btn-text" type="button" data-cert-open="${cert.id}">${icon('documents', 16)} Ver certificado</button>` : '<span></span>'}
+          <button class="link-btn-text danger" type="button" data-cert-del="${cert.id}">Eliminar</button>
+        </div>
+      </div>
+    </section>`;
+}
+
 function renderRenta() {
   const slips = slipsOfYear(selYear, viewProfiles());
   const r = rentaData(slips);
@@ -1508,6 +1693,10 @@ function renderRenta() {
       <div class="pill"><span class="label">Seguridad Social</span><span class="amount neg">${money(-r.ss)}</span></div>
     </section>
     ${yearSelector()}
+    ${viewProfiles().flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certSection(p, c))).join('')}
+    ${isTotal() || currentProfile().certs.some((c) => c.year === selYear) ? '' : `
+    <section class="group"><button class="add-btn cert-add" type="button">${icon('upload', 18)} Subir certificado de retenciones ${selYear}</button>
+      <p class="muted small amort-note">El que da la empresa para la Renta. Se comprobará si cuadra con la suma de tus nóminas de ${selYear}.</p></section>`}
     <section class="group"><h2>Ingresos</h2><div class="list ts-list">
       ${row('Retribuciones dinerarias', r.gross, 'Todos los abonos de las nóminas')}
       ${row('Retribuciones en especie', r.especie, 'Comedor, seguros, acciones…')}
@@ -1527,107 +1716,131 @@ function renderRenta() {
       <div class="list ts-list">${conceptRows(r.arrears, null)}</div>
       <p class="muted small amort-note">Cobrados en ${selYear} pero devengados antes: están incluidos en las retribuciones dinerarias.</p>
     </section>` : ''}
-    <p class="muted small amort-note">Referencia calculada con tus nóminas. Compárala con el certificado de retenciones de la empresa antes de presentar la declaración.</p>`;
+    <p class="muted small amort-note">Referencia calculada con tus nóminas. Lo que vale para la declaración es el certificado de retenciones de la empresa.</p>`;
   bindYearSelector(el);
+  el.querySelector('.cert-add')?.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'application/pdf';
+    inp.addEventListener('change', () => { if (inp.files.length) importFiles(inp.files, currentProfile()); });
+    inp.click();
+  });
+  el.querySelectorAll('[data-cert-open]').forEach((b) => b.addEventListener('click', () => {
+    const { c } = findCert(b.dataset.certOpen);
+    openFile(c.file, `Certificado ${c.year}`);
+  }));
+  el.querySelectorAll('[data-cert-del]').forEach((b) => b.addEventListener('click', async () => {
+    const { c, p } = findCert(b.dataset.certDel);
+    if (!(await confirmSheet('Eliminar certificado', `Se borrará el certificado de ${c.year}. Se puede deshacer.`))) return;
+    change(() => { p.certs = p.certs.filter((x) => x !== c); });
+    render();
+  }));
   return el;
 }
 
 // ---------- Evolución ----------
-// Neto de cada mes (el gráfico) y la tabla por años con su variación sobre el anterior.
-function monthSeries(profiles) {
-  const m = new Map();
-  allSlips(profiles).forEach((s) => {
-    const k = `${s.year}-${String(s.month).padStart(2, '0')}`;
-    m.set(k, (m.get(k) || 0) + slipTotals(s).net);
+// Bruto y neto de cada año (barras) y la tabla con su variación. El año en curso, si aún no está
+// completo, se compara con los mismos meses del anterior.
+function yearRows(profiles) {
+  const years = [...new Set(allSlips(profiles).map((s) => s.year))].sort((a, b) => a - b);
+  return years.map((y) => {
+    const slips = slipsOfYear(y, profiles);
+    const lastM = Math.max(...slips.map((s) => s.month));
+    const t = aggregate(slips);
+    const prev = slipsOfYear(y - 1, profiles);
+    const base = prev.length ? aggregate(prev.filter((s) => lastM === 12 || s.month <= lastM)) : null;
+    return { y, ...t, lastM, partial: lastM < 12, dGross: base ? t.gross - base.gross : null, dNet: base ? t.net - base.net : null };
   });
-  return [...m].sort((a, b) => a[0].localeCompare(b[0])).map(([month, net]) => ({ month, net: round2(net) }));
 }
-function evolutionChart(series) {
-  if (series.length < 2) return '<p class="muted small hist-empty">El gráfico aparecerá cuando haya al menos dos meses.</p>';
-  const W = 320, H = 130, P = 6;
-  const vals = series.map((s) => s.net);
-  let min = Math.min(0, ...vals), max = Math.max(...vals);
-  if (min === max) max += 1;
-  const idx = (m) => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7));
-  const t0 = idx(series[0].month);
-  const span = Math.max(1, idx(series.at(-1).month) - t0);
-  const x = (i) => P + ((idx(series[i].month) - t0) * (W - 2 * P)) / span;
-  const y = (v) => P + (H - 2 * P) * (1 - (v - min) / (max - min));
-  const pts = series.map((s, i) => `${x(i).toFixed(1)},${y(s.net).toFixed(1)}`).join(' ');
-  const area = `${P},${H - P} ${pts} ${W - P},${H - P}`;
-  const label = (m) => `${MONTHS_SHORT[Number(m.slice(5, 7)) - 1]} ${m.slice(2, 4)}`;
+function evolutionChart(rows) {
+  if (!rows.length) return '<p class="muted small hist-empty">El gráfico aparecerá cuando subas nóminas.</p>';
+  const shown = rows.slice(-8);
+  const W = 320, H = 150, P = 4, TOP = 14, LBL = 18;
+  const max = Math.max(...shown.map((r) => r.gross), 1);
+  const slot = (W - 2 * P) / shown.length;
+  const bw = Math.min(26, slot * 0.32);
+  const h = (v) => Math.max(0, ((H - TOP - LBL) * v) / max);
+  const bars = shown.map((r, i) => {
+    const cx = P + slot * (i + 0.5);
+    const yb = H - LBL;
+    return `
+      <rect x="${(cx - bw - 1.5).toFixed(1)}" y="${(yb - h(r.gross)).toFixed(1)}" width="${bw.toFixed(1)}" height="${h(r.gross).toFixed(1)}" rx="3" fill="url(#evo-gross)"/>
+      <rect x="${(cx + 1.5).toFixed(1)}" y="${(yb - h(r.net)).toFixed(1)}" width="${bw.toFixed(1)}" height="${h(r.net).toFixed(1)}" rx="3" fill="url(#evo-net)"/>
+      <text x="${cx.toFixed(1)}" y="${H - 4}" text-anchor="middle" class="evo-lbl">${r.y}${r.partial ? '*' : ''}</text>`;
+  }).join('');
   return `
-    <svg class="hist-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="Evolución del neto mensual">
+    <svg class="evo-chart" viewBox="0 0 ${W} ${H}" aria-label="Bruto y neto por años">
       <defs>
-        <linearGradient id="hist-line" x1="0" x2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset=".55" stop-color="#34d399"/><stop offset="1" stop-color="#bef264"/></linearGradient>
-        <linearGradient id="hist-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#34d399" stop-opacity=".28"/><stop offset="1" stop-color="#34d399" stop-opacity="0"/></linearGradient>
+        <linearGradient id="evo-gross" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".35"/></linearGradient>
+        <linearGradient id="evo-net" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#bef264"/><stop offset="1" stop-color="#34d399" stop-opacity=".45"/></linearGradient>
       </defs>
-      <polygon points="${area}" fill="url(#hist-fill)"/>
-      <polyline points="${pts}" fill="none" stroke="url(#hist-line)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+      ${bars}
     </svg>
-    <div class="hist-axis"><span class="muted small">${label(series[0].month)}</span><span class="muted small">${label(series.at(-1).month)}</span></div>`;
+    <div class="legend evo-legend"><span><i style="background:#22d3ee"></i>Bruto</span><span><i style="background:#a3e635"></i>Neto</span>${shown.some((r) => r.partial) ? '<span class="muted">* año en curso</span>' : ''}</div>`;
 }
 function renderEvolution() {
   const profiles = viewProfiles();
-  const series = monthSeries(profiles);
-  const years = yearsWithData(profiles).filter((y) => slipsOfYear(y, profiles).length);
-  const byYear = years.map((y) => ({ y, ...aggregate(slipsOfYear(y, profiles)) }));
-  const cur = byYear[0];
-  // El año en curso se compara con los mismos meses del anterior (enero → último mes con nómina).
-  const lastM = cur ? Math.max(...slipsOfYear(cur.y, profiles).map((s) => s.month)) : 12;
-  const prev = byYear[1] && byYear[1].y === cur.y - 1
-    ? aggregate(slipsOfYear(cur.y - 1, profiles).filter((s) => s.month <= lastM)) : null;
-  const period = lastM < 12 ? `ene–${MONTHS_SHORT[lastM - 1]} ${cur.y - 1}` : String(cur?.y - 1);
+  const rows = yearRows(profiles);
+  const cur = rows.at(-1);
   const diffCls = (v) => (isPrivate() || !v ? '' : v > 0 ? 'pos' : 'neg');
+  const signed = (v) => (v == null ? '—' : isPrivate() ? MASK : (v > 0 ? '+' : '') + numStr2(v));
+  const period = cur && cur.partial ? `ene–${MONTHS_SHORT[cur.lastM - 1]} ’${String(cur.y - 1).slice(2)}` : cur ? String(cur.y - 1) : '';
   const el = document.createElement('div');
   el.innerHTML = `
     <section class="hero compact">
-      <p class="label">Neto ${cur ? cur.y : new Date().getFullYear()}</p>
-      <p class="net amount">${money(cur?.net)}</p>
+      <p class="label">Bruto ${cur ? cur.y : new Date().getFullYear()}${cur?.partial ? ` · hasta ${MONTHS[cur.lastM - 1]}` : ''}</p>
+      <p class="net amount">${money(cur?.gross)}</p>
+      <p class="muted small">Neto ${money(cur?.net)}${cur?.gross ? ` · ${isPrivate() ? MASK : numPct((cur.net / cur.gross) * 100)} del bruto` : ''}</p>
     </section>
     <section class="summary hist-pills">
-      <div class="pill"><span class="label">Neto vs. ${prev ? period : 'año anterior'}</span><span class="amount ${prev ? diffCls(cur.net - prev.net) : ''}">${prev ? money(cur.net - prev.net, true) : '—'}</span></div>
-      <div class="pill"><span class="label">Bruto vs. ${prev ? period : 'año anterior'}</span><span class="amount ${prev ? diffCls(cur.gross - prev.gross) : ''}">${prev ? money(cur.gross - prev.gross, true) : '—'}</span></div>
+      <div class="pill"><span class="label">Bruto vs. ${cur?.dGross != null ? period : 'año anterior'}</span><span class="amount ${diffCls(cur?.dGross)}">${cur?.dGross != null ? money(cur.dGross, true) : '—'}</span></div>
+      <div class="pill"><span class="label">Neto vs. ${cur?.dNet != null ? period : 'año anterior'}</span><span class="amount ${diffCls(cur?.dNet)}">${cur?.dNet != null ? money(cur.dNet, true) : '—'}</span></div>
     </section>
-    <section class="group hist-chart-wrap"><div class="list hist-chart-box">${evolutionChart(series)}</div></section>
+    <section class="group hist-chart-wrap"><div class="list hist-chart-box">${evolutionChart(rows)}</div></section>
     <section class="group">
       <h2>Por años</h2>
       <ul class="movs amort hist-list">
         <li class="mv-year open"><div class="amort-rows">
-          <div class="amort-cols evo-cols"><span>Año</span><span>Bruto</span><span>IRPF</span><span>Neto</span><span>Variación</span></div>
-          ${byYear.map((r, i) => {
-            // Año sin terminar: variación frente a los mismos meses del anterior.
-            const lm = Math.max(...slipsOfYear(r.y, profiles).map((x) => x.month));
-            const base = byYear[i + 1]?.y === r.y - 1 ? aggregate(slipsOfYear(r.y - 1, profiles).filter((x) => x.month <= lm)) : null;
-            const d = base ? r.net - base.net : null;
-            return `<div class="amort-row evo-cols"><span>${r.y}</span><span>${numStr2(r.gross)}</span><span>${numStr2(r.irpf)}</span><span>${numStr2(r.net)}</span><span class="${d == null ? '' : diffCls(d)}">${d == null ? '—' : (d > 0 ? '+' : '') + numStr2(d)}</span></div>`;
-          }).join('') || '<div class="amort-row"><span class="muted">Sin datos</span></div>'}
+          <div class="amort-cols evo-cols"><span>Año</span><span>Bruto</span><span>Neto</span><span>Var. bruto</span><span>Var. neto</span></div>
+          ${[...rows].reverse().map((r) => `
+          <div class="amort-row evo-cols"><span>${r.y}${r.partial ? '*' : ''}</span><span>${numStr2(r.gross)}</span><span>${numStr2(r.net)}</span>
+            <span class="${diffCls(r.dGross)}">${signed(r.dGross)}</span><span class="${diffCls(r.dNet)}">${signed(r.dNet)}</span></div>`).join('')
+          || '<div class="amort-row"><span class="muted">Sin datos</span></div>'}
         </div></li>
       </ul>
+      ${rows.some((r) => r.partial) ? '<p class="muted small amort-note">* Año sin terminar: la variación se calcula frente a los mismos meses del año anterior.</p>' : ''}
     </section>`;
   return el;
 }
 
 // ---------- Documentos ----------
 function renderDocuments() {
-  const slips = sortSlips(allSlips(viewProfiles()).filter((s) => s.file));
-  const total = slips.reduce((a, s) => a + s.file.size, 0);
+  const profiles = viewProfiles();
+  const slips = sortSlips(allSlips(profiles).filter((s) => s.file));
+  const certs = profiles.flatMap((p) => p.certs).filter((c) => c.file).sort((a, b) => b.year - a.year);
+  const total = [...slips, ...certs].reduce((a, x) => a + x.file.size, 0);
+  const n = slips.length + certs.length;
+  const docBtn = (attr, ic, title, f) => `
+        <button class="block" type="button" ${attr} style="--block-color:#a3e635">
+          <span class="cat-icon" style="color:#a3e635">${icon(ic)}</span>
+          <span class="cat-text"><span class="cat-name">${esc(title)}</span><span class="muted small">${esc(f.name)} · ${sizeText(f.size)}</span></span>
+          <span class="chev">${icon('chevron', 16)}</span>
+        </button>`;
   const el = document.createElement('div');
   el.innerHTML = `
     <section class="hero compact">
       <p class="label">Documentos guardados</p>
-      <p class="net">${slips.length}</p>
-      <p class="muted small">${slips.length ? `${sizeText(total)} en este dispositivo` : 'Los PDF que adjuntes a cada nómina aparecerán aquí.'}</p>
+      <p class="net">${n}</p>
+      <p class="muted small">${n ? `${sizeText(total)} en este dispositivo` : 'Los PDF de tus nóminas y certificados aparecerán aquí.'}</p>
     </section>
+    ${certs.length ? `<section class="group"><h2>Certificados de retenciones</h2><div class="blocks">${certs.map((c) =>
+      docBtn(`data-cert="${c.id}"`, 'renta', `Certificado ${c.year}`, c.file)).join('')}</div></section>` : ''}
     <section class="group">
-      <div class="blocks">${slips.map((s) => `
-        <button class="block" type="button" data-doc="${s.id}" style="--block-color:#a3e635">
-          <span class="cat-icon" style="color:#a3e635">${icon('payslips')}</span>
-          <span class="cat-text"><span class="cat-name">${esc(slipTitle(s))}${s.kind !== 'monthly' ? ` · ${KINDS[s.kind]}` : ''}</span><span class="muted small">${esc(s.file.name)} · ${sizeText(s.file.size)}</span></span>
-          <span class="chev">${icon('chevron', 16)}</span>
-        </button>`).join('') || '<p class="empty muted">No hay documentos.</p>'}</div>
+      ${certs.length ? '<h2>Nóminas</h2>' : ''}
+      <div class="blocks">${slips.map((s) => docBtn(`data-doc="${s.id}"`, 'payslips', `${slipTitle(s)}${s.kind !== 'monthly' ? ` · ${KINDS[s.kind]}` : ''}`, s.file)).join('') || '<p class="empty muted">No hay documentos.</p>'}</div>
     </section>`;
-  el.querySelectorAll('[data-doc]').forEach((b) => b.addEventListener('click', () => openFile(findSlip(b.dataset.doc).s)));
+  el.querySelectorAll('[data-doc]').forEach((b) => b.addEventListener('click', () => { const s = findSlip(b.dataset.doc).s; openFile(s.file, slipTitle(s)); }));
+  el.querySelectorAll('[data-cert]').forEach((b) => b.addEventListener('click', () => { const c = findCert(b.dataset.cert).c; openFile(c.file, `Certificado ${c.year}`); }));
   return el;
 }
 
@@ -1677,9 +1890,9 @@ function downloadBlob(blob, name) {
 }
 async function exportBackup() {
   const out = { mark: BACKUP_MARK, version: APP_VERSION, at: new Date().toISOString(), data, files: {} };
-  for (const s of data.profiles.flatMap((p) => p.slips).filter((x) => x.file)) {
-    const blob = await files.get(s.file.id).catch(() => null);
-    if (blob) out.files[s.file.id] = { type: blob.type, b64: await blobToB64(blob) };
+  for (const f of data.profiles.flatMap((p) => [...p.slips, ...p.certs]).map((x) => x.file).filter(Boolean)) {
+    const blob = await files.get(f.id).catch(() => null);
+    if (blob) out.files[f.id] = { type: blob.type, b64: await blobToB64(blob) };
   }
   const name = `PayCTRL copia ${new Date().toISOString().slice(0, 10)}.txt`;
   const blob = new Blob([JSON.stringify(out)], { type: 'text/plain' });
@@ -1719,6 +1932,365 @@ function openBackupSheet() {
   back.querySelector('.b-export').addEventListener('click', () => { closeSheet(); exportBackup(); });
   back.querySelector('.b-import input').addEventListener('change', (e) => { const f = e.target.files[0]; closeSheet(); if (f) importBackup(f); });
   back.querySelector('.b-close').addEventListener('click', closeSheet);
+}
+
+// ---------- Sincronización en la nube ----------
+// Igual que en UnderCTRL: cuenta con usuario y contraseña (crearla pide la clave de registro, la
+// misma de UnderCTRL) y cifrado de extremo a extremo: los datos y los PDF se cifran aquí
+// (PBKDF2 + AES-256-GCM) antes de subirse; el servidor solo guarda bloques ilegibles.
+// Las claves derivan con sal propia («nominas-…»): mismo usuario que en UnderCTRL, cuenta distinta.
+const SYNC_KEY = 'nominas:sync';
+const SYNC_API = '/api/sync';
+const SYNC_EVERY_MS = 3 * 60 * 1000; // sincronización periódica mientras la app está abierta
+const PBKDF2_ITERATIONS = 310000;
+const BACKUP_CHECK_MS = 6.5 * 24 * 3600e3; // copia de seguridad semanal en la nube
+const utf8 = new TextEncoder();
+
+let sync = load(SYNC_KEY, null); // { username, user, auth, key, rev, dirty, at, backupAt }
+const saveSync = () => { if (sync) save(SYNC_KEY, sync); else { try { localStorage.removeItem(SYNC_KEY); } catch {} } };
+let pushTimer = null;
+let syncBusy = false;
+let syncError = '';
+let backupBusy = false;
+
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const sha256hex = async (text) => hex(await crypto.subtle.digest('SHA-256', utf8.encode(text)));
+// base64 por trozos (los datos pueden ser grandes para String.fromCharCode(...bytes))
+const toB64 = (buf) => {
+  const bytes = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const fromB64 = (str) => Uint8Array.from(atob(str), (ch) => ch.charCodeAt(0));
+
+async function deriveAccount(username, password) {
+  const u = username.trim().toLowerCase();
+  const base = await crypto.subtle.importKey('raw', utf8.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = (salt) => crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: utf8.encode(salt), iterations: PBKDF2_ITERATIONS }, base, 256);
+  // Dos claves independientes: una para identificarse y otra (que nunca sale de aquí) para cifrar.
+  const [auth, key] = await Promise.all([bits(`nominas-auth:${u}`), bits(`nominas-enc:${u}`)]);
+  return { username: u, user: await sha256hex(`nominas-user:${u}`), auth: hex(auth), key: toB64(key) };
+}
+
+const aesKey = () => crypto.subtle.importKey('raw', fromB64(sync.key), 'AES-GCM', false, ['encrypt', 'decrypt']);
+async function encryptBytes(bytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aesKey(), bytes);
+  return `${toB64(iv)}.${toB64(ct)}`;
+}
+async function decryptBytes(blob) {
+  const [iv, ct] = blob.split('.');
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(iv) }, await aesKey(), fromB64(ct));
+}
+const encryptData = (obj) => encryptBytes(utf8.encode(JSON.stringify(obj)));
+const decryptData = async (blob) => JSON.parse(new TextDecoder().decode(await decryptBytes(blob)));
+
+async function syncCall(action, extra = {}, account = sync) {
+  const body = JSON.stringify({ action, user: account.user, auth: account.auth, ...extra });
+  const res = await fetch(SYNC_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    // Al salir de la app, que la subida termine aunque se cierre (Safari lo limita a 64 KB).
+    keepalive: document.hidden && body.length < 60000,
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(out.error || `http ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return out;
+}
+
+const syncErrorText = (err) => ({
+  auth: 'Usuario o contraseña incorrectos.',
+  exists: 'Ese nombre de usuario ya existe. Elige otro o entra con tu cuenta.',
+  'too-many': 'Demasiados intentos. Espera 15 minutos.',
+  invite: 'La clave de registro no es correcta.',
+  'not-configured': 'Falta conectar la base de datos en Vercel (Storage → Upstash Redis).',
+}[err.message] || 'No se pudo conectar con la nube. Se reintentará.');
+
+const hasAnyData = () => data.profiles.some((p) => p.slips.some((s) => !s.demo) || p.certs.length);
+// Archivos a los que apuntan los datos (nóminas y certificados)
+const fileRefs = () => data.profiles.flatMap((p) => [...p.slips, ...p.certs]).map((x) => x.file).filter(Boolean);
+
+function applyRemote(obj) {
+  data = normData(obj);
+  save(STORAGE_KEY, data);
+  undoStack.length = 0; // los cambios llegados de otro dispositivo no se deshacen desde aquí
+  updateUndoBtn();
+  if (!validView(viewId)) viewId = data.profiles[0].id;
+  if (screen.startsWith('slip:') && !findSlip(screen.slice(5))) screen = 'payslips';
+  render();
+}
+
+// Marca cambios locales para subir (se agrupan unos segundos).
+function markDirty() {
+  if (!sync) return;
+  sync.dirty = true;
+  saveSync();
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => syncNow(), 1500);
+}
+
+// PDF: se suben los que falten en la nube y se bajan los que falten en este dispositivo.
+async function syncFiles() {
+  const refs = fileRefs();
+  if (!refs.length) return;
+  const remote = new Set((await syncCall('file-list')).ids);
+  for (const f of refs) {
+    const local = await files.get(f.id).catch(() => null);
+    if (local && !remote.has(f.id)) {
+      await syncCall('file-put', { id: f.id, blob: await encryptBytes(await local.arrayBuffer()) });
+    } else if (!local && remote.has(f.id)) {
+      const { blob } = await syncCall('file-get', { id: f.id });
+      await files.put(f.id, new Blob([await decryptBytes(blob)], { type: f.type || 'application/pdf' }));
+    }
+  }
+}
+
+// Descarga cambios y sube los locales. Devuelve true si todo fue bien.
+async function syncNow({ interactive = false } = {}) {
+  if (!sync || syncBusy) return false;
+  syncBusy = true;
+  clearTimeout(pushTimer);
+  try {
+    const remote = await syncCall('pull');
+    if (remote.rev > sync.rev && remote.blob) {
+      if (sync.dirty) {
+        // Cambios en los dos lados: se pregunta qué versión conservar.
+        const keepCloud = await chooseSheet(
+          'Cambios en dos dispositivos',
+          'Hay cambios en la nube hechos desde otro dispositivo y también cambios en este que aún no se habían subido. ¿Qué versión quieres conservar?',
+          [{ label: 'Los de la nube', value: true }, { label: 'Los de este dispositivo', value: false }],
+        );
+        if (keepCloud) {
+          applyRemote(await decryptData(remote.blob));
+          sync.dirty = false;
+        }
+      } else {
+        applyRemote(await decryptData(remote.blob));
+      }
+      sync.rev = remote.rev;
+    }
+    if (sync.dirty) {
+      const blob = await encryptData(data);
+      try {
+        const out = await syncCall('push', { blob, baseRev: sync.rev });
+        sync.rev = out.rev;
+        sync.dirty = false;
+      } catch (err) {
+        if (err.status !== 409) throw err;
+        syncBusy = false;
+        return syncNow({ interactive }); // alguien subió justo antes: se vuelve a comparar
+      }
+    }
+    await syncFiles();
+    sync.at = Date.now();
+    syncError = '';
+    saveSync();
+    setTimeout(weeklyBackup, 0);
+    return true;
+  } catch (err) {
+    console.warn(err);
+    syncError = syncErrorText(err);
+    if (interactive) showToast(syncError, { warn: true });
+    return false;
+  } finally {
+    syncBusy = false;
+  }
+}
+
+// Copia de seguridad semanal de los datos (el servidor guarda las 12 últimas), cifrada igual.
+async function weeklyBackup() {
+  if (!sync || backupBusy || Date.now() - (sync.backupAt || 0) < BACKUP_CHECK_MS) return;
+  backupBusy = true;
+  try {
+    const out = await syncCall('backup', { blob: await encryptData(data) });
+    sync.backupAt = out.at;
+    saveSync();
+  } catch (err) {
+    console.warn('copia de seguridad', err);
+  } finally {
+    backupBusy = false;
+  }
+}
+
+async function pullFromCloud() {
+  if (!sync) return false;
+  for (let i = 0; syncBusy && i < 50; i++) await new Promise((r) => setTimeout(r, 100));
+  syncBusy = true;
+  clearTimeout(pushTimer);
+  try {
+    const remote = await syncCall('pull');
+    if (remote.blob) applyRemote(await decryptData(remote.blob));
+    sync.rev = remote.rev;
+    sync.dirty = false;
+    await syncFiles();
+    sync.at = Date.now();
+    syncError = '';
+    saveSync();
+    return true;
+  } catch (err) {
+    console.warn(err);
+    syncError = syncErrorText(err);
+    showToast(syncError, { warn: true });
+    return false;
+  } finally {
+    syncBusy = false;
+  }
+}
+
+function syncStatusText() {
+  if (!sync) return 'Desactivada';
+  if (syncError) return syncError;
+  if (sync.dirty) return 'Cambios pendientes de subir';
+  if (!sync.at) return 'Pendiente';
+  const mins = Math.round((Date.now() - sync.at) / 60000);
+  return `Al día · ${mins < 1 ? 'hace un momento' : mins < 60 ? `hace ${mins} min` : new Date(sync.at).toLocaleString(LOCALE, { dateStyle: 'short', timeStyle: 'short' })}`;
+}
+
+// Panel con dos o más opciones; resuelve con el `value` elegido.
+function chooseSheet(title, text, options) {
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'sheet-backdrop';
+    back.innerHTML = `
+      <div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+        <h2 class="sheet-title">${esc(title)}</h2>
+        <p class="muted">${esc(text)}</p>
+        <div class="choice-list">${options.map((o, i) => `<button class="text-btn ${i === 0 ? 'done-btn' : ''}" data-i="${i}" type="button">${esc(o.label)}</button>`).join('')}</div>
+      </div>`;
+    back.querySelectorAll('[data-i]').forEach((b) => b.addEventListener('click', () => {
+      back.remove();
+      resolve(options[b.dataset.i].value);
+    }));
+    document.body.append(back);
+  });
+}
+
+// Pantalla de la cuenta: crear, entrar o ver el estado.
+function openSyncSheet() {
+  const back = newSheet();
+
+  const renderConnected = () => {
+    back.innerHTML = `
+      <div class="sheet" role="dialog" aria-modal="true" aria-label="Sincronización en la nube">
+        <h2 class="sheet-title">Sincronización en la nube</h2>
+        <p>Conectado como <b>${esc(sync.username)}</b></p>
+        <p class="muted small s-status">${esc(syncStatusText())}</p>
+        <p class="muted small">Las nóminas, los certificados y sus PDF se cifran en este dispositivo antes de subirse. Entra con el mismo usuario y contraseña en tu otro iPhone, iPad u ordenador para verlos.</p>
+        <div class="choice-list">
+          <button class="text-btn done-btn s-now" type="button">${icon('refresh', 16)} Sincronizar ahora</button>
+          <button class="text-btn s-pull" type="button">Traer los datos de la nube</button>
+          <button class="text-btn s-logout" type="button">Desconectar este dispositivo</button>
+          <button class="text-btn s-close" type="button">Cerrar</button>
+        </div>
+      </div>`;
+    back.querySelector('.s-close').addEventListener('click', closeSheet);
+    back.querySelector('.s-now').addEventListener('click', async () => {
+      back.querySelector('.s-status').textContent = 'Sincronizando…';
+      await syncNow({ interactive: true });
+      back.querySelector('.s-status').textContent = syncStatusText();
+    });
+    back.querySelector('.s-pull').addEventListener('click', async () => {
+      if (!confirm('Se sustituirán los datos de este dispositivo por los guardados en la nube (los de tus otros dispositivos). Lo que no se haya subido desde aquí se perderá. ¿Continuar?')) return;
+      back.querySelector('.s-status').textContent = 'Descargando…';
+      const ok = await pullFromCloud();
+      back.querySelector('.s-status').textContent = syncStatusText();
+      if (ok) showToast('Datos traídos de la nube.');
+    });
+    back.querySelector('.s-logout').addEventListener('click', () => {
+      if (!confirm('¿Desconectar este dispositivo? Los datos se quedan en él, pero dejarán de sincronizarse.')) return;
+      sync = null;
+      saveSync();
+      closeSheet();
+      showToast('Sincronización desactivada en este dispositivo.');
+    });
+  };
+
+  const renderForm = (mode = hasAnyData() ? 'create' : 'login') => {
+    back.innerHTML = `
+      <div class="sheet" role="dialog" aria-modal="true" aria-label="Sincronización en la nube">
+        <h2 class="sheet-title">Sincronización en la nube</h2>
+        <p class="muted small">Tus datos se cifran en este dispositivo con tu contraseña antes de subirse: nadie más puede leerlos, ni siquiera el servidor. <b>Si olvidas la contraseña no se pueden recuperar.</b></p>
+        <div class="seg s-mode" role="group" aria-label="Cuenta">
+          <button type="button" data-mode="create">Crear cuenta</button><button type="button" data-mode="login">Ya tengo cuenta</button>
+        </div>
+        <label class="field"><span>Usuario</span><input class="s-user" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="40"></label>
+        <label class="field"><span>Contraseña</span><input class="s-pass" type="password" autocomplete="${mode === 'create' ? 'new-password' : 'current-password'}" maxlength="128"></label>
+        ${mode === 'create' ? `<label class="field"><span>Repite la contraseña</span><input class="s-pass2" type="password" autocomplete="new-password" maxlength="128"></label>
+        <label class="field"><span>Clave de registro</span><input class="s-invite" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="La misma que en UnderCTRL"></label>` : ''}
+        <p class="s-error error" role="alert"></p>
+        <div class="body-actions">
+          <button class="text-btn s-cancel" type="button">Cancelar</button>
+          <button class="text-btn done-btn s-go" type="button">${mode === 'create' ? 'Crear cuenta' : 'Entrar'}</button>
+        </div>
+      </div>`;
+    const q = (sel) => back.querySelector(sel);
+    back.querySelectorAll('[data-mode]').forEach((b) => {
+      b.classList.toggle('on', b.dataset.mode === mode);
+      b.addEventListener('click', () => renderForm(b.dataset.mode));
+    });
+    q('.s-cancel').addEventListener('click', closeSheet);
+    q('.s-user').focus();
+
+    q('.s-go').addEventListener('click', async () => {
+      const err = q('.s-error');
+      const username = q('.s-user').value.trim();
+      const password = q('.s-pass').value;
+      if (username.length < 3) return void (err.textContent = 'El usuario debe tener al menos 3 caracteres.');
+      if (password.length < 8) return void (err.textContent = 'La contraseña debe tener al menos 8 caracteres.');
+      if (mode === 'create' && password !== q('.s-pass2').value) return void (err.textContent = 'Las contraseñas no coinciden.');
+      if (mode === 'create' && !q('.s-invite').value.trim()) return void (err.textContent = 'Introduce la clave de registro.');
+
+      const btn = q('.s-go');
+      btn.disabled = true;
+      btn.textContent = 'Un momento…';
+      err.textContent = '';
+      try {
+        const account = await deriveAccount(username, password);
+        if (mode === 'create') {
+          await syncCall('register', { invite: q('.s-invite').value.trim() }, account);
+          sync = { ...account, rev: 0, dirty: true, at: null };
+          saveSync();
+          await syncNow({ interactive: true });
+          showToast('Cuenta creada. Tus nóminas ya están en la nube, cifradas.');
+        } else {
+          const remote = await syncCall('pull', {}, account);
+          sync = { ...account, rev: 0, dirty: false, at: null };
+          if (remote.blob) {
+            const cloud = await decryptData(remote.blob);
+            const useCloud = !hasAnyData() || await chooseSheet(
+              'Este dispositivo ya tiene datos',
+              '¿Qué datos quieres conservar? Los otros se sustituirán.',
+              [{ label: 'Los de la nube', value: true }, { label: 'Los de este dispositivo', value: false }],
+            );
+            if (useCloud) applyRemote(cloud);
+            sync.rev = remote.rev;
+            sync.dirty = !useCloud;
+          } else {
+            sync.dirty = true; // cuenta vacía: se suben los datos de aquí
+          }
+          saveSync();
+          await syncNow({ interactive: true });
+          showToast('Dispositivo conectado a tu cuenta.');
+        }
+        closeSheet();
+      } catch (e) {
+        console.warn(e);
+        if (mode === 'login') sync = load(SYNC_KEY, null);
+        err.textContent = syncErrorText(e);
+        btn.disabled = false;
+        btn.textContent = mode === 'create' ? 'Crear cuenta' : 'Entrar';
+      }
+    });
+  };
+
+  if (sync) renderConnected();
+  else renderForm();
 }
 
 // ---------- Opciones de visualización ----------
@@ -1861,6 +2433,9 @@ buildTabbar();
 updateUndoBtn();
 setPrivate(load(PRIVACY_KEY, false));
 go('lock');
+// Con la nube activada: sincroniza al abrir y luego cada 3 minutos (solo con la app a la vista).
+if (sync) syncNow();
+setInterval(() => { if (sync && !document.hidden) syncNow(); }, SYNC_EVERY_MS);
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
