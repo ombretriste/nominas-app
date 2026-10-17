@@ -2,7 +2,7 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **0.4.2**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **0.5.0**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
@@ -12,6 +12,7 @@ Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estéti
 - **Subir nóminas**: se eligen uno o varios PDF y se leen solos (pdf.js): mes, paga extra, empresa, % de retención, líquido y cada línea del recibo (formato SAP de Airbus: CLAVE · CONCEPTO · ORIGEN · HORAS/% · DESCUENTOS · ABONOS · BASE). Se comprueba que el cálculo coincide con el líquido impreso. Si un archivo no se puede leer (foto, otro formato), se mete a mano. Los archivos se guardan en IndexedDB del dispositivo.
 - **Conceptos**: catálogo con nombre claro de cada clave (`CATALOG` en `app.js`): devengos por clase (A1 personales, A2 puesto, A3 cantidad o calidad, A4 pagas, A5 incidencias, B1 no salariales), descuentos (Seguridad Social, IRPF, plan de pensiones, cuota sindical, acciones ESOP, créditos), retribución en especie, solo base de cotización y aportación de la empresa. Suma anual de cada uno; los atrasos y regularizaciones muestran sus meses de origen.
 - **Certificado de retenciones** (dentro de Renta): se sube su PDF (o se elige junto a las nóminas) y se lee solo. Se compara casilla a casilla con la suma de las nóminas de ese año: retribuciones dinerarias, retenciones, Seguridad Social y aportación de la empresa al plan deben coincidir (margen de 1 €); especie y rentas exentas son orientativas. El Resumen indica si cuadra.
+- **Declaración de la Renta** (dentro de Renta): se sube el PDF de la declaración presentada (Modelo 100) y se lee solo; se guardan solo las casillas con importe (sin nombres, NIF ni direcciones). Muestra un resumen (resultado a devolver o ingresar, fecha de presentación, tipo medio, rendimiento neto del trabajo, capital mobiliario, ganancias patrimoniales, bases liquidables, cuotas, deducciones, pagos a cuenta y pérdidas pendientes) y comprueba casillas con el certificado (0003, 0004, 0005, 0008, 0013 y 0596 = retenciones + ingresos a cuenta) y con las nóminas (0014 cuotas sindicales, 0426 aportación al plan de empresa).
 - **Renta**: rendimientos dinerarios y en especie, aportación de la empresa al plan, retenciones, Seguridad Social, cuotas sindicales, aportaciones propias al plan y atrasos de años anteriores (referencia; lo oficial es el certificado de retenciones).
 - **Evolución**: bruto y neto por años (barras) y tabla con su variación; el año en curso se compara con los mismos meses del anterior.
 - **Selector de año**: todos los años con datos, 4 a la vista; la barra se desliza para ver los anteriores.

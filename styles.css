@@ -2019,3 +2019,7 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .year-seg.scrolls { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .year-seg.scrolls::-webkit-scrollbar { display: none; }
 .year-seg.scrolls button { flex: 0 0 calc(25% - 1.5px); scroll-snap-align: start; }
+.decl-head { display: flex; flex-direction: column; gap: 2px; padding: 2px 2px 10px; }
+.decl-head .label { text-transform: uppercase; letter-spacing: .2em; font-size: 11px; color: var(--muted); }
+.decl-result { font-size: 32px; font-weight: 200; font-variant-numeric: tabular-nums; }
+.decl-check-head { padding: 12px 2px 6px; border-top: 1px solid var(--line); margin-top: 6px; }

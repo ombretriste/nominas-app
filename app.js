@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '0.4.2';
+const APP_VERSION = '0.5.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -326,7 +326,13 @@ function normCert(c) {
   };
 }
 
-async function pdfText(file) {
+// Texto de un PDF (se recuerda por archivo: al subir se mira si es declaración, certificado o nómina).
+const pdfTextCache = new WeakMap();
+function pdfText(file) {
+  if (!pdfTextCache.has(file)) pdfTextCache.set(file, readPdfText(file));
+  return pdfTextCache.get(file);
+}
+async function readPdfText(file) {
   const lib = await loadPdfJs();
   const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
   let text = '';
@@ -398,6 +404,131 @@ function certCheck(cert, slips, pool = slips) {
   return { rows, ok: rows.filter((x) => x.strict).every((x) => x.ok), count: slips.length };
 }
 
+// ---------- Declaración de la Renta presentada (Modelo 100 de la AEAT) ----------
+// Se guardan solo las casillas con importe (número de casilla → valor), la fecha de presentación
+// y el PDF. No se copian nombres, NIF ni direcciones a los datos.
+function normDecl(d) {
+  const c = {};
+  Object.entries(d.c || {}).forEach(([k, v]) => { if (/^\d{4}$/.test(k) && Number.isFinite(Number(v))) c[k] = Number(v); });
+  return {
+    id: d.id || uid(),
+    year: Number(d.year) || new Date().getFullYear() - 1,
+    presented: d.presented || '', // AAAA-MM-DD
+    c,
+    file: d.file && d.file.id ? { id: d.file.id, name: d.file.name || 'declaración', type: d.file.type || '', size: Number(d.file.size) || 0 } : null,
+  };
+}
+
+// Devuelve { year, presented, c } o null si el PDF no es un Modelo 100.
+async function readDeclPdf(file) {
+  const t = await pdfText(file);
+  if (!/Modelo\s*100\b/.test(t) || !/Impuesto sobre la Renta de las Personas F[ií]sicas/i.test(t)) return null;
+  const year = Number(t.match(/Modelo\s*100\s+(?:Impuesto sobre la Renta de las Personas F[ií]sicas\s+)?Ejercicio\s+(\d{4})/i)?.[1]
+    ?? t.match(/Ejercicio\s+(\d{4})/)?.[1]) || null;
+  const p = t.match(/Presentación realizada el:\s*(\d{2})-(\d{2})-(\d{4})/);
+  const c = {};
+  // Cada importe va seguido de su número de casilla: «73.954,73 0003». Vale la primera aparición.
+  for (const m of t.matchAll(/(-?\d{1,3}(?:\.\d{3})*,\d{2})\s+(\d{4})(?!\d)/g)) if (!(m[2] in c)) c[m[2]] = pdfNum(m[1]);
+  if (!Object.keys(c).length) return null;
+  return { year, presented: p ? `${p[3]}-${p[2]}-${p[1]}` : '', c };
+}
+const cas = (d, ...codes) => round2(codes.reduce((a, k) => a + (d.c[k] || 0), 0));
+
+// Casillas que deben coincidir con el certificado de la empresa y con las nóminas del ejercicio.
+function declCheck(d, cert, slips, pool) {
+  const r = rentaData(slips, pool, d.year);
+  const rows = [];
+  const add = (label, box, value, ref, src, tol = 1) => {
+    const diff = ref == null ? null : round2(value - ref);
+    rows.push({ label, box, value, ref, src, diff, ok: diff != null && Math.abs(diff) < tol });
+  };
+  if (cert) {
+    add('Retribuciones dinerarias', '0003', cas(d, '0003'), cert.gross, 'Certificado');
+    add('Valoración de la especie', '0004', cas(d, '0004'), cert.especie, 'Certificado');
+    add('Ingresos a cuenta de la especie', '0005', cas(d, '0005'), cert.iac, 'Certificado');
+    add('Aportación de la empresa al plan', '0008', cas(d, '0008'), cert.pp, 'Certificado');
+    add('Seguridad Social', '0013', cas(d, '0013'), cert.ss, 'Certificado');
+    // Pagos a cuenta del trabajo = retenciones + ingresos a cuenta de la especie
+    add('Retenciones del trabajo', '0596', cas(d, '0596'), round2(cert.ret + cert.iac), 'Certificado');
+  } else if (slips.length) {
+    add('Retribuciones dinerarias', '0003', cas(d, '0003'), round2(r.gross + r.caja), 'Nóminas');
+    add('Seguridad Social', '0013', cas(d, '0013'), r.ss, 'Nóminas');
+    add('Aportación de la empresa al plan', '0008', cas(d, '0008'), r.ppCo, 'Nóminas');
+  }
+  if (slips.length) {
+    if (d.c['0014'] != null || r.union) add('Cuotas sindicales', '0014', cas(d, '0014'), r.union, 'Nóminas');
+    if (d.c['0426'] != null || r.ppEmp) add('Tu aportación al plan de empresa', '0426', cas(d, '0426'), r.ppEmp, 'Nóminas');
+  }
+  return { rows, ok: rows.length > 0 && rows.every((x) => x.ok), hasCert: !!cert, count: slips.length };
+}
+
+// Resumen rápido de la declaración y comprobación casilla a casilla.
+function declSection(p, d) {
+  const cert = p.certs.find((c) => c.year === d.year) ?? null;
+  const chk = declCheck(d, cert, p.slips.filter((s) => s.year === d.year), p.slips);
+  const result = d.c['0670'] ?? d.c['0695'] ?? null;
+  const refund = result != null && result < 0;
+  const who = data.profiles.length > 1 ? ` · ${esc(p.name)}` : '';
+  const line = (label, v, note = '', cls = '') => (v == null ? '' : `
+    <div class="cat-row"><span class="cat-name">${label}${note ? `<small class="muted">${note}</small>` : ''}</span><span class="amount ${cls}">${money(v)}</span></div>`);
+  const has = (...k) => k.some((x) => d.c[x] != null);
+  const cuotaIntegra = has('0545', '0546') ? cas(d, '0545', '0546') : null;
+  const cuotaLiquida = has('0587') ? cas(d, '0587') : has('0570', '0571') ? cas(d, '0570', '0571') : null;
+  const deducciones = cuotaIntegra != null && cuotaLiquida != null ? round2(cuotaIntegra - cuotaLiquida) : null;
+  const tipoMedio = has('0534', '0535') ? cas(d, '0534', '0535') : null;
+  const presented = d.presented ? new Date(d.presented).toLocaleDateString(LOCALE, { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+  const status = !chk.rows.length
+    ? `<p class="small muted">Sube el certificado o las nóminas de ${d.year} para comprobarla.</p>`
+    : chk.ok
+      ? `<p class="small ok-line">${icon('check', 14)} Cuadra con ${chk.hasCert ? 'el certificado' : 'las nóminas'}${chk.hasCert && chk.count ? ' y las nóminas' : ''}</p>`
+      : '<p class="small warn-line">Hay casillas que no cuadran: revisa las diferencias.</p>';
+  return `
+    <section class="group decl-group">
+      <h2>Declaración de la Renta ${d.year}${who}</h2>
+      <div class="list cert-card decl-card">
+        <div class="decl-head">
+          <span class="label">${result == null ? 'Resultado' : refund ? 'A devolver' : 'A ingresar'}</span>
+          <span class="decl-result ${result == null ? '' : refund ? 'pos' : 'neg'}">${result == null ? '—' : money(Math.abs(result))}</span>
+          <span class="muted small">${presented ? `Presentada el ${presented}` : 'Modelo 100'}${tipoMedio != null ? ` · tipo medio ${isPrivate() ? MASK : numPct(tipoMedio)}` : ''}</span>
+        </div>
+        <div class="cert-extra decl-lines">
+          ${line('Rendimiento neto del trabajo', d.c['0022'] ?? d.c['0025'], 'Tras Seguridad Social, cuotas sindicales y otros gastos')}
+          ${line('Rendimientos del capital mobiliario', d.c['0041'], 'Dividendos, intereses… (neto)')}
+          ${line('Ganancias y pérdidas patrimoniales', d.c['0424'], 'Saldo neto (venta de acciones, fondos…)')}
+          ${line('Reducción por planes de pensiones', d.c['0492'])}
+          ${line('Base liquidable general', d.c['0505'] ?? d.c['0500'])}
+          ${line('Base liquidable del ahorro', d.c['0510'])}
+          ${line('Cuota íntegra', cuotaIntegra, 'Estatal + autonómica')}
+          ${deducciones ? line('Deducciones', -deducciones, 'Donativos, autonómicas…', 'neg') : ''}
+          ${line('Cuota líquida', cuotaLiquida)}
+          ${line('Retenciones y pagos a cuenta', d.c['0609'] != null ? -d.c['0609'] : null, '', 'neg')}
+          ${line(refund ? 'Resultado: a devolver' : 'Resultado: a ingresar', result == null ? null : Math.abs(result), '', refund ? 'pos' : 'neg')}
+          ${d.c['1263'] ? line('Pérdidas pendientes de compensar', d.c['1263'], 'Para ejercicios futuros') : ''}
+        </div>
+        <div class="decl-check-head">${status}</div>
+        ${chk.rows.length ? `
+        <div class="amort-cols cert-cols"><span>Casilla</span><span>Declaración</span><span>${chk.hasCert ? 'Certif./nóminas' : 'Nóminas'}</span><span>Dif.</span></div>
+        ${chk.rows.map((x) => `
+        <div class="amort-row cert-cols">
+          <span class="cc-label">${esc(x.label)}<small class="muted">${x.box} · según ${x.src.toLowerCase()}</small></span>
+          <span>${numStr2(x.value)}</span><span>${numStr2(x.ref)}</span>
+          <span class="${x.ok ? 'pos' : 'neg'}">${x.ok ? icon('check', 13) : (x.diff > 0 ? '+' : '') + numStr2(x.diff)}</span>
+        </div>`).join('')}` : ''}
+        <div class="cert-actions">
+          ${d.file ? `<button class="link-btn-text" type="button" data-decl-open="${d.id}">${icon('documents', 16)} Ver declaración</button>` : '<span></span>'}
+          <button class="link-btn-text danger" type="button" data-decl-del="${d.id}">Eliminar</button>
+        </div>
+      </div>
+    </section>`;
+}
+function findDecl(id) {
+  for (const p of data.profiles) {
+    const d = p.decls.find((x) => x.id === id);
+    if (d) return { d, p };
+  }
+  return null;
+}
+
 function normData(d) {
   const profiles = Array.isArray(d?.profiles) && d.profiles.length ? d.profiles : [{ name: 'Yo' }];
   return {
@@ -407,6 +538,7 @@ function normData(d) {
       color: p.color || PROFILE_COLORS[i % PROFILE_COLORS.length],
       slips: (p.slips || []).map(normSlip),
       certs: (p.certs || []).map(normCert),
+      decls: (p.decls || []).map(normDecl),
     })),
   };
 }
@@ -487,7 +619,7 @@ const allSlips = (profiles = viewProfiles()) => profiles.flatMap((p) => p.slips.
 const slipsOfYear = (year, profiles) => allSlips(profiles).filter((s) => s.year === year);
 const sortSlips = (arr) => [...arr].sort((a, b) => b.year - a.year || b.month - a.month || (a.kind === 'monthly' ? 1 : -1));
 function yearsWithData(profiles = viewProfiles()) {
-  const ys = new Set([...allSlips(profiles).map((s) => s.year), ...profiles.flatMap((p) => p.certs.map((c) => c.year))]);
+  const ys = new Set([...allSlips(profiles).map((s) => s.year), ...profiles.flatMap((p) => [...p.certs, ...p.decls].map((c) => c.year))]);
   ys.add(new Date().getFullYear());
   return [...ys].sort((a, b) => b - a);
 }
@@ -1407,12 +1539,26 @@ function renderSlip(s, p) {
 // Si un archivo no se puede leer (una foto, otro formato), se abre el formulario para meterla a mano.
 async function importFiles(fileList, owner) {
   const list = [...fileList];
-  const done = [], skipped = [], manual = [], certsDone = [];
+  const done = [], skipped = [], manual = [], certsDone = [], declsDone = [];
   showToast(`Leyendo ${list.length === 1 ? 'el archivo' : `${list.length} archivos`}…`);
   const parsed = [];
   for (const f of list) {
     let r = null;
     if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+      // ¿Declaración de la Renta (Modelo 100)? Se guarda en su ejercicio (sustituye a la que hubiera).
+      try {
+        const d = await readDeclPdf(f);
+        if (d?.year) {
+          const id = uid();
+          await files.put(id, f);
+          change(() => {
+            owner.decls = owner.decls.filter((x) => x.year !== d.year);
+            owner.decls.push(normDecl({ ...d, file: { id, name: f.name, type: f.type || 'application/pdf', size: f.size } }));
+          });
+          declsDone.push(d.year);
+          continue;
+        }
+      } catch (e) { console.warn(e); }
       // ¿Certificado de retenciones? Se guarda en su año (sustituye al que hubiera).
       try {
         const c = await readCertPdf(f);
@@ -1459,6 +1605,7 @@ async function importFiles(fileList, owner) {
   const msg = [
     done.length ? `${done.length === 1 ? 'Nómina guardada' : `${done.length} nóminas guardadas`}` : '',
     certsDone.length ? `certificado ${certsDone.join(', ')} guardado` : '',
+    declsDone.length ? `declaración ${declsDone.join(', ')} guardada` : '',
     skipped.length ? `ya estaban: ${skipped.join(', ')}` : '',
   ].filter(Boolean).join(' · ');
   if (msg) showToast(msg, { warn: !done.length });
@@ -1467,8 +1614,8 @@ async function importFiles(fileList, owner) {
   } else if (manual.length > 1) {
     showToast(`${manual.length} archivos no se pudieron leer: ${manual.map((f) => f.name).join(', ')}. Súbelos de uno en uno para meterlos a mano.`, { warn: true });
   }
-  if (certsDone.length && !done.length) {
-    selYear = certsDone[0];
+  if ((certsDone.length || declsDone.length) && !done.length) {
+    selYear = declsDone[0] ?? certsDone[0];
     go('renta', screen === 'renta' ? null : 'forward');
   } else if (done.length === 1 && !manual.length) go(`slip:${done[0].id}`, 'forward');
   else if (done.length) go('payslips', screen === 'payslips' ? null : 'forward');
@@ -1488,7 +1635,7 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
       <label class="add-btn file-pick main-pick">${icon('upload', 18)} <span>Elegir PDF de nóminas o certificados</span>
         <input type="file" class="multi-pick" accept="application/pdf,image/*" multiple hidden>
       </label>
-      <p class="muted small">Puedes elegir varios a la vez: se leen solos (mes, paga extra, empresa y todos los conceptos). El certificado de retenciones de la Renta también se reconoce y va a su año. Si alguno no se puede leer, podrás meterlo a mano.</p>
+      <p class="muted small">Puedes elegir varios a la vez: se leen solos (mes, paga extra, empresa y todos los conceptos). El certificado de retenciones y la declaración de la Renta también se reconocen y van a su año. Si alguno no se puede leer, podrás meterlo a mano.</p>
       <p class="opt-label">O a mano</p>`}
       ${pendingFile ? `<p class="muted small">No se ha podido leer «${esc(pendingFile.name)}». Rellena los importes y se guardará con el archivo.</p>` : ''}
       ${existing ? `
@@ -1741,10 +1888,14 @@ function renderRenta() {
       <div class="pill"><span class="label">Seguridad Social</span><span class="amount neg">${money(-r.ss)}</span></div>
     </section>
     ${yearSelector()}
+    ${viewProfiles().flatMap((p) => p.decls.filter((d) => d.year === selYear).map((d) => declSection(p, d))).join('')}
     ${viewProfiles().flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certSection(p, c))).join('')}
     ${isTotal() || currentProfile().certs.some((c) => c.year === selYear) ? '' : `
     <section class="group"><button class="add-btn cert-add" type="button">${icon('upload', 18)} Subir certificado de retenciones ${selYear}</button>
       <p class="muted small amort-note">El que da la empresa para la Renta. Se comprobará si cuadra con la suma de tus nóminas de ${selYear}.</p></section>`}
+    ${isTotal() || currentProfile().decls.some((d) => d.year === selYear) ? '' : `
+    <section class="group"><button class="add-btn cert-add" type="button">${icon('upload', 18)} Subir declaración de la Renta ${selYear}</button>
+      <p class="muted small amort-note">El PDF de la declaración presentada (Modelo 100). Verás su resumen y si cuadra con el certificado y las nóminas.</p></section>`}
     <section class="group"><h2>Ingresos</h2><div class="list ts-list">
       ${row('Retribuciones dinerarias', r.gross, 'Todos los abonos de las nóminas')}
       ${r.caja ? row('Percepciones por caja', r.caja, `Cobradas fuera de la nómina en ${selYear}; retención estimada ${numStr2(r.cajaRet)} €`) : ''}
@@ -1767,13 +1918,23 @@ function renderRenta() {
     </section>` : ''}
     <p class="muted small amort-note">Referencia calculada con tus nóminas. Lo que vale para la declaración es el certificado de retenciones de la empresa.</p>`;
   bindYearSelector(el);
-  el.querySelector('.cert-add')?.addEventListener('click', () => {
+  el.querySelectorAll('.cert-add').forEach((btn) => btn.addEventListener('click', () => {
     const inp = document.createElement('input');
     inp.type = 'file';
     inp.accept = 'application/pdf';
     inp.addEventListener('change', () => { if (inp.files.length) importFiles(inp.files, currentProfile()); });
     inp.click();
-  });
+  }));
+  el.querySelectorAll('[data-decl-open]').forEach((b) => b.addEventListener('click', () => {
+    const { d } = findDecl(b.dataset.declOpen);
+    openFile(d.file, `Declaración ${d.year}`);
+  }));
+  el.querySelectorAll('[data-decl-del]').forEach((b) => b.addEventListener('click', async () => {
+    const { d, p } = findDecl(b.dataset.declDel);
+    if (!(await confirmSheet('Eliminar declaración', `Se borrará la declaración de ${d.year}. Se puede deshacer.`))) return;
+    change(() => { p.decls = p.decls.filter((x) => x !== d); });
+    render();
+  }));
   el.querySelectorAll('[data-cert-open]').forEach((b) => b.addEventListener('click', () => {
     const { c } = findCert(b.dataset.certOpen);
     openFile(c.file, `Certificado ${c.year}`);
@@ -1867,8 +2028,9 @@ function renderDocuments() {
   const profiles = viewProfiles();
   const slips = sortSlips(allSlips(profiles).filter((s) => s.file));
   const certs = profiles.flatMap((p) => p.certs).filter((c) => c.file).sort((a, b) => b.year - a.year);
-  const total = [...slips, ...certs].reduce((a, x) => a + x.file.size, 0);
-  const n = slips.length + certs.length;
+  const decls = profiles.flatMap((p) => p.decls).filter((d) => d.file).sort((a, b) => b.year - a.year);
+  const total = [...slips, ...certs, ...decls].reduce((a, x) => a + x.file.size, 0);
+  const n = slips.length + certs.length + decls.length;
   const docBtn = (attr, ic, title, f) => `
         <button class="block" type="button" ${attr} style="--block-color:#a3e635">
           <span class="cat-icon" style="color:#a3e635">${icon(ic)}</span>
@@ -1880,16 +2042,19 @@ function renderDocuments() {
     <section class="hero compact">
       <p class="label">Documentos guardados</p>
       <p class="net">${n}</p>
-      <p class="muted small">${n ? `${sizeText(total)} en este dispositivo` : 'Los PDF de tus nóminas y certificados aparecerán aquí.'}</p>
+      <p class="muted small">${n ? `${sizeText(total)} en este dispositivo` : 'Los PDF de tus nóminas, certificados y declaraciones aparecerán aquí.'}</p>
     </section>
+    ${decls.length ? `<section class="group"><h2>Declaraciones de la Renta</h2><div class="blocks">${decls.map((d) =>
+      docBtn(`data-decl="${d.id}"`, 'renta', `Declaración ${d.year}`, d.file)).join('')}</div></section>` : ''}
     ${certs.length ? `<section class="group"><h2>Certificados de retenciones</h2><div class="blocks">${certs.map((c) =>
       docBtn(`data-cert="${c.id}"`, 'renta', `Certificado ${c.year}`, c.file)).join('')}</div></section>` : ''}
     <section class="group">
-      ${certs.length ? '<h2>Nóminas</h2>' : ''}
+      ${certs.length || decls.length ? '<h2>Nóminas</h2>' : ''}
       <div class="blocks">${slips.map((s) => docBtn(`data-doc="${s.id}"`, 'payslips', `${slipTitle(s)}${s.kind !== 'monthly' ? ` · ${KINDS[s.kind]}` : ''}`, s.file)).join('') || '<p class="empty muted">No hay documentos.</p>'}</div>
     </section>`;
   el.querySelectorAll('[data-doc]').forEach((b) => b.addEventListener('click', () => { const s = findSlip(b.dataset.doc).s; openFile(s.file, slipTitle(s)); }));
   el.querySelectorAll('[data-cert]').forEach((b) => b.addEventListener('click', () => { const c = findCert(b.dataset.cert).c; openFile(c.file, `Certificado ${c.year}`); }));
+  el.querySelectorAll('[data-decl]').forEach((b) => b.addEventListener('click', () => { const d = findDecl(b.dataset.decl).d; openFile(d.file, `Declaración ${d.year}`); }));
   return el;
 }
 
@@ -1939,7 +2104,7 @@ function downloadBlob(blob, name) {
 }
 async function exportBackup() {
   const out = { mark: BACKUP_MARK, version: APP_VERSION, at: new Date().toISOString(), data, files: {} };
-  for (const f of data.profiles.flatMap((p) => [...p.slips, ...p.certs]).map((x) => x.file).filter(Boolean)) {
+  for (const f of data.profiles.flatMap((p) => [...p.slips, ...p.certs, ...p.decls]).map((x) => x.file).filter(Boolean)) {
     const blob = await files.get(f.id).catch(() => null);
     if (blob) out.files[f.id] = { type: blob.type, b64: await blobToB64(blob) };
   }
@@ -2061,9 +2226,9 @@ const syncErrorText = (err) => ({
   'not-configured': 'Falta conectar la base de datos en Vercel (Storage → Upstash Redis).',
 }[err.message] || 'No se pudo conectar con la nube. Se reintentará.');
 
-const hasAnyData = () => data.profiles.some((p) => p.slips.some((s) => !s.demo) || p.certs.length);
+const hasAnyData = () => data.profiles.some((p) => p.slips.some((s) => !s.demo) || p.certs.length || p.decls.length);
 // Archivos a los que apuntan los datos (nóminas y certificados)
-const fileRefs = () => data.profiles.flatMap((p) => [...p.slips, ...p.certs]).map((x) => x.file).filter(Boolean);
+const fileRefs = () => data.profiles.flatMap((p) => [...p.slips, ...p.certs, ...p.decls]).map((x) => x.file).filter(Boolean);
 
 function applyRemote(obj) {
   data = normData(obj);
