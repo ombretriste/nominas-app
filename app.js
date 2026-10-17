@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -191,7 +191,8 @@ function prettyName(s) {
   s = s.replace(/\s+/g, ' ').trim();
   if (/[a-zá-ú]/.test(s)) return s; // ya viene en minúsculas y mayúsculas
   const out = s.toLowerCase().replace(/^./, (c) => c.toUpperCase());
-  return out.split(' ').map((w) => ACRONYMS.find((a) => a.toLowerCase() === w) ?? w).join(' ');
+  return out.split(' ').map((w) => ACRONYMS.find((a) => a.toLowerCase() === w) ?? w).join(' ')
+    .replace(/\bi\.\s?r\.\s?p\.\s?f\.?/gi, 'IRPF').replace(/^Retencion\b/, 'Retención');
 }
 const NUM_RE = /^\d{1,3}(?:\.\d{3})*,\d{2}-?$/;
 const pdfNum = (s) => { const n = parseAmount(s.replace(/-$/, '')); return s.endsWith('-') ? -n : n; };
@@ -304,6 +305,128 @@ async function readPayslipPdf(file) {
     concepts,
   };
 }
+// ---------- Lector por columnas (A3, Sage y otros programas de nóminas) ----------
+// Recibos con una tabla «Concepto · Unidades · Precio/Importe · Devengado/Devengos · A deducir/
+// Deducciones» y los totales en cajas aparte («Total devengado», «Total deducciones», «Líquido»).
+// En el texto del PDF etiquetas e importes salen desordenados, así que se usa la posición de cada
+// texto en la página. Lee cada concepto; si los totales cuadran se guarda sin más, si no, se revisa.
+const T_NUM = /^-?\d{1,3}(?:\.\d{3})*,\d{2,4}-?$|^-?\d+,\d{2,4}-?$/;
+const tNum = (s) => { const neg = s.startsWith('-') || s.endsWith('-'); const n = parseAmount(s.replace(/-/g, '')); return neg ? -n : n; };
+
+async function pdfItems(file) {
+  const lib = await loadPdfJs();
+  const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n);
+    pages.push((await page.getTextContent()).items.filter((it) => it.str.trim())
+      .map((it) => ({ s: it.str.trim().replace(/\s+/g, ' '), x: it.transform[4], y: it.transform[5], w: it.width })));
+  }
+  return pages;
+}
+
+async function readTablePayslipPdf(file) {
+  const pages = await pdfItems(file);
+  const text = (await pdfText(file));
+  const concepts = [];
+  let gross = null, dedTotal = null, liquid = null;
+  const center = (it) => it.x + it.w / 2;
+  for (const items of pages) {
+    const head = items.find((it) => /^Concepto/i.test(it.s));
+    if (!head) continue;
+    const onHead = items.filter((it) => Math.abs(it.y - head.y) < 4);
+    const devH = onHead.find((it) => /^(Devengad|Devengos|Percepciones|Abonos)/i.test(it.s));
+    const dedH = onHead.find((it) => /Deducir|Deducciones|Descuentos/i.test(it.s));
+    if (!devH || !dedH) continue;
+    const cols = { dev: center(devH), ded: center(dedH) };
+    const qtyH = onHead.find((it) => /^(Unidades|Cantidad|Horas|D[ií]as)/i.test(it.s));
+    const priceH = onHead.find((it) => /^(Precio|Importe)/i.test(it.s));
+    if (qtyH) cols.qty = center(qtyH);
+    if (priceH) cols.price = center(priceH);
+    // Cajas de totales: lo que hay por debajo ya no son conceptos
+    const footLabels = items.filter((it) => it.y < head.y - 4 && /^(Total|Remuneraci[óo]n Total|Prorrata|L[íi]quido|Base|Aportaci[óo]n|APORTACI[ÓO]N)/i.test(it.s));
+    const footTop = footLabels.length ? Math.max(...footLabels.map((it) => it.y)) : -Infinity;
+    const body = items.filter((it) => it.y < head.y - 4 && it.y > footTop + 3);
+    const rows = [];
+    [...body].sort((a, b) => b.y - a.y || a.x - b.x).forEach((it) => {
+      const row = rows.find((r) => Math.abs(r.y - it.y) < 3);
+      if (row) row.items.push(it); else rows.push({ y: it.y, items: [it] });
+    });
+    for (const r of rows) {
+      const nums = r.items.filter((it) => T_NUM.test(it.s));
+      const name = r.items.filter((it) => !T_NUM.test(it.s) && center(it) < (cols.qty ?? cols.price ?? cols.dev) - 20).map((it) => it.s).join(' ').trim();
+      if (!name || !nums.length) continue;
+      const byCol = {};
+      nums.forEach((it) => {
+        const c = center(it);
+        const best = Object.entries(cols).sort((a, b) => Math.abs(a[1] - c) - Math.abs(b[1] - c))[0][0];
+        byCol[best] = tNum(it.s);
+      });
+      if (byCol.dev == null && byCol.ded == null) continue;
+      const ded = byCol.ded != null;
+      const cat = !ded ? 'other' : /I\.?\s?R\.?\s?P\.?\s?F|RETENCI/i.test(name) ? 'irpf'
+        : /CONT\.?\s*COM|CONTINGENC|COTIZ|DESEMPLEO|FORMACI[ÓO]N|\bS\.?\s?S\.?\b|SEG\.?\s*SOC|\bM\.?E\.?I\b|EQUIDAD|HORAS EXTRA/i.test(name) ? 'ss' : 'other';
+      concepts.push(normConcept({ name: prettyName(name), type: ded ? 'ded' : 'dev', cat, amount: ded ? byCol.ded : byCol.dev, qty: byCol.qty ?? null }));
+    }
+    // Totales: el importe a la derecha en la misma línea o justo debajo de la etiqueta
+    const valueOf = (re) => {
+      const lab = items.find((it) => re.test(it.s));
+      if (!lab) return null;
+      const cand = items.filter((it) => T_NUM.test(it.s)).map((it) => {
+        const dy = lab.y - it.y, dx = center(it) - center(lab);
+        const same = Math.abs(dy) < 3 && it.x > lab.x;
+        const below = dy > 0 && dy < 30 && Math.abs(dx) < 70;
+        return same || below ? { it, d: same ? it.x - lab.x : dy * 3 + Math.abs(dx) } : null;
+      }).filter(Boolean).sort((a, b) => a.d - b.d);
+      return cand.length ? tNum(cand[0].it.s) : null;
+    };
+    gross ??= valueOf(/^Total Devengado|^Total Devengos|^Total Percepciones/i);
+    dedTotal ??= valueOf(/^Total Deducciones|^Total a Deducir|^Total Descuentos/i);
+    liquid ??= valueOf(/^L[íi]quido|^Total a percibir|^Neto a percibir/i);
+    // Cotizaciones del trabajador que solo figuran en su recuadro (columna «Cuota»)
+    const ap = items.find((it) => /APORTACI[ÓO]N DEL TRABAJADOR/i.test(it.s));
+    const dedSum = round2(concepts.filter((k) => k.type === 'ded').reduce((a, k) => a + k.amount, 0));
+    if (ap && dedTotal != null && dedSum < dedTotal - 0.01) {
+      const cuota = items.find((it) => /^Cuota$/i.test(it.s) && it.y < ap.y && it.x > ap.x - 20 && it.x < ap.x + ap.w + 10);
+      if (cuota) {
+        const labels = items.filter((it) => it.y < cuota.y - 3 && it.y > cuota.y - 120 && it.x < ap.x && !T_NUM.test(it.s));
+        for (const lab of labels) {
+          const v = items.find((it) => T_NUM.test(it.s) && Math.abs(it.y - lab.y) < 3 && Math.abs(center(it) - center(cuota)) < 30);
+          if (v && tNum(v.s)) concepts.push(normConcept({ name: prettyName(lab.s), type: 'ded', cat: 'ss', amount: tNum(v.s) }));
+        }
+      }
+    }
+  }
+  if (!concepts.some((k) => k.type === 'dev') || liquid == null) return null;
+  // Periodo: «Del 01 de ENERO de 2017 al 31 de DICIEMBRE de 2017» (o con fechas dd/mm/aaaa).
+  // Si abarca varios meses (bonus anual, atrasos…) cuenta la fecha de pago (la de la firma).
+  const M = `${MONTHS.join('|')}|setiembre`;
+  const mIdx = (w) => MONTHS.indexOf(w.toLowerCase().replace('setiembre', 'septiembre')) + 1;
+  let year = null, month = null, kind = 'monthly';
+  const pw = text.match(new RegExp(`Del?\\s+\\d{1,2}\\s+de\\s+(${M})\\s+de\\s+(\\d{4})\\s+al?\\s+\\d{1,2}\\s+de\\s+(${M})\\s+de\\s+(\\d{4})`, 'i'));
+  const pd = text.match(/Del?\s+\d{1,2}[\/.-](\d{1,2})[\/.-](\d{4})\s+al?\s+\d{1,2}[\/.-](\d{1,2})[\/.-](\d{4})/i);
+  const span = pw ? [mIdx(pw[1]), +pw[2], mIdx(pw[3]), +pw[4]] : pd ? [+pd[1], +pd[2], +pd[3], +pd[4]] : null;
+  if (span && span[0] === span[2] && span[1] === span[3]) { month = span[0]; year = span[1]; }
+  else if (span) {
+    const rest = pw ? text.replace(pw[0], '') : pd ? text.replace(pd[0], '') : text;
+    const paid = rest.match(new RegExp(`\\b\\d{1,2}\\s+de\\s+(${M})\\s+de\\s+(\\d{4})`, 'i'));
+    if (paid) { month = mIdx(paid[1]); year = +paid[2]; } else { month = span[2]; year = span[3]; }
+    kind = 'extra';
+  } else {
+    const named = text.match(new RegExp(`\\b(${M})\\b\\s*(?:de\\s+|\\/\\s*)?((?:19|20)\\d{2})\\b`, 'i'));
+    if (named) { month = mIdx(named[1]); year = +named[2]; }
+  }
+  if (/(?:PAGA|GRATIFICACI[ÓO]N)\s+(?:EXTRA|EXTRAORDINARIA)/i.test(text) && !concepts.some((k) => /SALARIO|SUELDO/i.test(k.name))) kind = 'extra';
+  const companyIt = pages.flat().find((it) => /,?\s*S\.\s?(?:A|L)\.(?:\s?U\.)?$|\bS\.?\s?COOP\.?$/i.test(it.s) && it.s.length > 6);
+  const t = slipTotals(normSlip({ concepts }));
+  const check = Math.abs(t.net - liquid) < 0.02 && (gross == null || Math.abs(t.gross - gross) < 0.02) && (dedTotal == null || Math.abs(t.gross - t.net - dedTotal) < 0.02);
+  return {
+    table: true, year, month, kind, company: companyIt ? prettyCompany(companyIt.s) : '',
+    concepts, liquid, irpfPct: concepts.find((k) => k.cat === 'irpf')?.qty ?? null,
+    gross: t.gross, irpf: t.irpf, ss: t.ss, other: t.other, check,
+  };
+}
+
 // ---------- Lector general de nóminas (cualquier empresa) ----------
 // Solo se usa si el PDF no tiene el formato de recibo SAP de arriba. Se apoya en el modelo oficial
 // de recibo de salarios (Orden ESS/2098/2014), común a todas las empresas: «Total devengado»,
@@ -1711,6 +1834,14 @@ async function importFiles(fileList, owner) {
         }
       } catch (e) { console.warn(e); }
       try { r = await readPayslipPdf(f); } catch (e) { console.warn(e); }
+      // Recibo en tabla por columnas (A3, Sage…): si cuadra con sus totales se guarda; si no, se revisa
+      if (!r || !r.year || !r.month) {
+        let tb = null;
+        try { tb = await readTablePayslipPdf(f); } catch (e) { console.warn(e); }
+        if (tb?.check && tb.year && tb.month) r = tb;
+        // (sin los conceptos, para poder corregir los importes en la ventana)
+        else if (tb) { review.push({ file: f, prefill: { ...tb, concepts: [], generic: true } }); continue; }
+      }
       // Formato desconocido: lector general de totales, que se revisa antes de guardar
       if (!r || !r.year || !r.month) {
         let g = null;
@@ -1784,7 +1915,9 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
       </label>
       <p class="muted small">Puedes elegir varios a la vez: se leen solos (mes, paga extra, empresa y todos los conceptos). El certificado de retenciones y la declaración de la Renta también se reconocen y van a su año. Si alguno no se puede leer, podrás meterlo a mano.</p>
       <p class="opt-label">O a mano</p>`}
-      ${pendingFile && prefill ? `<p class="muted small">«${esc(pendingFile.name)}» no tiene un formato conocido: se han leído sus totales con el lector general. Revisa el mes y los importes antes de guardar.</p>
+      ${pendingFile && prefill ? `<p class="muted small">${prefill.table
+        ? `«${esc(pendingFile.name)}» se ha leído por columnas, pero sus conceptos no cuadran del todo con los totales impresos. Revisa el mes y los importes antes de guardar.`
+        : `«${esc(pendingFile.name)}» no tiene un formato conocido: se han leído sus totales con el lector general. Revisa el mes y los importes antes de guardar.`}</p>
       ${prefill.check
         ? `<p class="small ok-line">${icon('check', 14)} Bruto − descuentos = líquido impreso (${money(prefill.liquid)})</p>`
         : `<p class="small warn-line">No se ha podido comprobar con el líquido impreso (${money(prefill.liquid)}): revísalo con el PDF.</p>`}
