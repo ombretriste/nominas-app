@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -2323,10 +2323,14 @@ function calcRenta(x) {
   const cie = round2(cGenE + cAho), cia = round2(cGenA + cAho);
   // Donativos (Ley 49/2002): 80 % de los primeros 250 € y 40 % del resto (45 % si son recurrentes)
   const donDed = round2(Math.min((Math.min(x.donativos, 250) * 0.8) + Math.max(0, x.donativos - 250) * (x.donRecurrent ? 0.45 : 0.4), 0.1 * (blg + bla)));
-  const deducciones = round2(Math.min(cie + cia, donDed + x.otrasDed));
+  // Doble imposición internacional (art. 80): lo retenido fuera, con el tope de lo que tributa aquí ese
+  // dividendo (al tipo medio del ahorro de la declaración)
+  const tipoAhorro = bla > 0 ? (2 * cAho) / bla : 0;
+  const dobleImp = round2(Math.min(x.divOrigin || 0, (x.divGross || 0) * tipoAhorro));
+  const deducciones = round2(Math.min(cie + cia, donDed + dobleImp + x.otrasDed));
   const cuotaLiq = round2(cie + cia - deducciones);
   const result = round2(cuotaLiq - x.retenciones);
-  return { ingresos, rnPrevio, otrosGastos, redTrabajo, rnTrabajo, ppTotal, ppRed, big, blg, aplicPend: round2(aplicGp + aplicRcm), bla, cie, cia, deducciones, cuotaLiq, result,
+  return { ingresos, rnPrevio, otrosGastos, redTrabajo, rnTrabajo, ppTotal, ppRed, big, blg, aplicPend: round2(aplicGp + aplicRcm), bla, cie, cia, donDed, dobleImp, deducciones, cuotaLiq, result,
     tipoMedio: blg ? round2(((cGenE + cGenA) / blg) * 100) : 0 };
 }
 
@@ -2384,7 +2388,7 @@ function forecastWork(p, y, fin) {
 
 // Ahorro y planes de UnderCTRL del ejercicio
 function financeYear(fin, y, set) {
-  const out = { items: [], ppPersonal: 0, ppTrab: 0, ppCo: 0 };
+  const out = { items: [], ppPersonal: 0, ppTrab: 0, ppCo: 0, divGross: 0, divOrigin: 0, divLocal: 0 };
   if (!fin) return out;
   const add = (it) => { it.excluded = !!set.exclude[it.id]; out.items.push(it); };
   for (const pl of fin.pensions) {
@@ -2401,7 +2405,14 @@ function financeYear(fin, y, set) {
       note: !ok ? 'Sin cambio de divisa: no se puede calcular' : s.fiscalPrice ? 'Con el precio de compra fiscal' : basis ? 'Con el precio de compra' : 'Falta el precio de compra', bad: !ok || !basis });
   }
   const divs = fin.dividends.filter((d) => inYear(d.date, y));
-  if (divs.length) add({ id: 'divs', kind: 'rcm', label: `Dividendos (${divs.length})`, amount: round2(divs.reduce((a, d) => a + d.total, 0)), note: 'Importe íntegro' });
+  if (divs.length) {
+    const gross = round2(divs.reduce((a, d) => a + d.total, 0));
+    const origin = round2(divs.reduce((a, d) => a + (d.origin || 0), 0));
+    const local = round2(divs.reduce((a, d) => a + (d.local || 0), 0));
+    add({ id: 'divs', kind: 'rcm', label: `Dividendos (${divs.length})`, amount: gross,
+      note: ['Importe bruto', origin ? `retención en origen ${numStr2(origin)} € (doble imposición)` : '', local ? `retención en España ${numStr2(local)} €` : ''].filter(Boolean).join(' · ') });
+    if (!set.exclude.divs) Object.assign(out, { divGross: gross, divOrigin: origin, divLocal: local });
+  }
   for (const f of [...fin.funds.map((x) => ({ ...x, t: 'Fondo' })), ...fin.crypto.map((x) => ({ ...x, t: 'Crypto' }))]) {
     const outs = f.movements.filter((m) => m.type === 'out' && inYear(m.date, y));
     if (!outs.length) continue;
@@ -2447,7 +2458,8 @@ function simInputs(p, y) {
       perdidasPend: pendValid,
       minE: last?.v.minE ?? MIN_PERSONAL.estatal, minA: last?.v.minA ?? MIN_PERSONAL.madrid,
       donativos: Number(set.donativos) || 0, donRecurrent: !!set.donRecurrent, otrasDed: Number(set.dedExtra) || 0,
-      retenciones: round2(r.irpf + r.cajaRet + iac + f.irpf + (Number(set.retExtra) || 0)),
+      retenciones: round2(r.irpf + r.cajaRet + iac + f.irpf + fy.divLocal + (Number(set.retExtra) || 0)),
+      divGross: fy.divGross, divOrigin: fy.divOrigin,
     },
   };
 }
@@ -2555,9 +2567,10 @@ function renderSim() {
       ${row('Base liquidable general', c.blg)}
       ${row('Cuota íntegra estatal', c.cie)}
       ${row('Cuota íntegra autonómica', c.cia, 'Madrid')}
-      ${c.deducciones ? row('Deducciones', -c.deducciones, S.x.donativos ? 'Donativos y otras' : 'Ajustes', 'neg') : ''}
+      ${c.dobleImp ? row('Deducción por doble imposición internacional', -c.dobleImp, `Retención en origen de los dividendos (${numStr2(S.x.divOrigin)} €), con el tope de lo que tributan aquí`, 'neg') : ''}
+      ${c.deducciones - c.dobleImp > 0.004 ? row(c.dobleImp ? 'Otras deducciones' : 'Deducciones', -round2(c.deducciones - c.dobleImp), S.x.donativos ? 'Donativos y otras' : 'Ajustes', 'neg') : ''}
       ${row('Cuota líquida', c.cuotaLiq)}
-      ${row('Retenciones y pagos a cuenta', -S.x.retenciones, `Nóminas${S.fc.total ? ' (cobradas y previstas)' : ''}${S.r.cajaRet ? ' y pagos por caja' : ''}${Number(S.set.retExtra) ? ' + ajustes' : ''}`, 'neg')}
+      ${row('Retenciones y pagos a cuenta', -S.x.retenciones, `Nóminas${S.fc.total ? ' (cobradas y previstas)' : ''}${S.r.cajaRet ? ', pagos por caja' : ''}${S.fy.divLocal ? `, dividendos (${numStr2(S.fy.divLocal)} € retenidos en España)` : ''}${Number(S.set.retExtra) ? ' + ajustes' : ''}`, 'neg')}
       ${row(refund ? 'Resultado: a devolver' : 'Resultado: a ingresar', Math.abs(c.result), '', refund ? 'pos' : 'neg')}
     </div>
     <p class="muted small amort-note">Mínimo personal ${S.last?.v.minE != null ? `de tu declaración de ${S.last.year}` : 'general'}. ${cal ? `Escalas comprobadas con tu declaración de ${cal.year}: ${Math.abs(cal.diff) < 1 ? 'cuota íntegra exacta' : `diferencia de ${money(cal.diff, true)}`}. ` : ''}Estimación orientativa: no incluye deducciones autonómicas, vivienda, familia ni otras rentas.</p></section>`;
@@ -2595,7 +2608,7 @@ function openSimSettings(p, y) {
         ${f('s-rcm', 'Intereses y otro capital mobiliario', set.rcmExtra)}
       </div>
       <div class="mrow-fields">
-        ${f('s-ret', 'Otras retenciones', set.retExtra, 'Dividendos, fondos…')}
+        ${f('s-ret', 'Otras retenciones', set.retExtra, 'Fondos, intereses…')}
         ${f('s-og', 'Otros gastos del trabajo', set.otrosGastos, '2.000 € en general')}
       </div>
       <div class="body-actions">
@@ -3232,7 +3245,12 @@ function extractFinance(fin) {
         buyDate: i.buyDate || '', buyPrice: Number(i.buyPrice) || 0, fiscalPrice: Number(i.fiscalPrice) || 0,
         sellDate: i.sellDate || '', sellPrice: Number(i.sellPrice) || 0, buyFx: Number(i.buyFx) || 0, sellFx: Number(i.sellFx) || 0,
       })),
-      dividends: (p.dividends ?? []).map((d) => ({ name: d.name || d.ticker, date: d.date || '', total: round2((Number(d.qty) || 0) * (Number(d.perShare) || 0)) })),
+      // Bruto y retenciones (% en el país de origen y en España, UnderCTRL ≥ 1.34.0)
+      dividends: (p.dividends ?? []).map((d) => {
+        const total = round2((Number(d.qty) || 0) * (Number(d.perShare) || 0));
+        return { name: d.name || d.ticker, date: d.date || '', total,
+          origin: round2((total * (Number(d.whOrigin) || 0)) / 100), local: round2((total * (Number(d.whLocal) || 0)) / 100) };
+      }),
       funds: (c.funds ?? []).map((i) => ({ id: i.id, name: i.name, amount: Number(i.amount) || 0, movements: movs(i) })),
       crypto: (c.crypto ?? []).map((i) => ({ id: i.id, name: i.name || i.fullName, amount: Number(i.amount) || 0, movements: movs(i) })),
       nomina,
