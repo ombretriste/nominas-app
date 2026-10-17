@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.4.2';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -158,6 +158,10 @@ function normSlip(s) {
 // Concepto de una nómina. type: 'dev' (abono), 'ded' (descuento), 'info' (solo base de cotización
 // o pago en especie: no se cobra) o 'emp' (aportación de la empresa). cat (descuentos): irpf, ss u other.
 function normConcept(k) {
+  // «Adelanto neto» (3682): la nómina lo resta como abono negativo, pero es la devolución de un
+  // anticipo ya cobrado (y que Hacienda cuenta como cobrado): se trata como descuento.
+  // (Sin usar constantes definidas más abajo: esto se ejecuta al cargar los datos.)
+  if ((k.code || '').split(' ').at(-1) === '3682' && k.type === 'dev') k = { ...k, type: 'ded', cat: 'other', amount: -(Number(k.amount) || 0) };
   return {
     id: k.id || uid(),
     code: k.code || '',
@@ -190,7 +194,8 @@ function prettyName(s) {
 }
 const NUM_RE = /^\d{1,3}(?:\.\d{3})*,\d{2}-?$/;
 const pdfNum = (s) => { const n = parseAmount(s.replace(/-$/, '')); return s.endsWith('-') ? -n : n; };
-const MONTH_RE = new RegExp(`\\b(${MONTHS.join('|')})\\b`, 'i');
+// Claves de paga extra (gratificaciones de julio y Navidad y su antigüedad)
+const EXTRA_CODES = ['0414', '0418', '0096', '0098'];
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -224,7 +229,7 @@ async function readPayslipPdf(file) {
     const colOf = (it) => (it ? it.x + it.w / 2 : null);
     const cols = {
       qty: colOf(head(/^HORAS/)), desc: colOf(head(/^DESCUENTOS$/)),
-      abono: colOf(head(/^ABONOS$/)), base: colOf(head(/^INCIDE/)),
+      abono: colOf(head(/^ABONOS$/)), base: colOf(head(/^(INCIDE|INDICE)/)), // las de 2014 dicen «INDICE»
     };
     // Filas: elementos a la misma altura
     const rows = [];
@@ -236,7 +241,8 @@ async function readPayslipPdf(file) {
     for (const r of rows) {
       r.items.sort((a, b) => a.x - b.x);
       const line = r.items.map((it) => it.s).join(' ');
-      const m = line.match(/^(?:([A-D]\d?)\s+)?(\/?[0-9A-Z]{3,4})\s+(.+?)\s+(\d{2}\/\d{4})(?:\s|$)/);
+      // Origen: MM/AAAA, o una sigla como «E.J» (paga extra de julio en las nóminas antiguas)
+      const m = line.match(/^(?:([A-D]\d?)\s+)?(\/?[0-9A-Z]{3,4})\s+(.+?)\s+(\d{2}\/\d{4}|[A-Z]\.[A-Z]\.?)(?:\s|$)/);
       if (!m) continue;
       const [, cls = '', code, name, origin] = m;
       const nums = r.items.filter((it) => NUM_RE.test(it.s) && it.x > r.items[0].x + 40);
@@ -254,7 +260,12 @@ async function readPayslipPdf(file) {
       if (letter === 'A' || letter === 'B') { type = 'dev'; amount = byCol.abono ?? last; }
       else if (letter === 'C') { type = 'ded'; amount = byCol.desc ?? last; }
       else if (letter === 'D') { type = 'info'; amount = byCol.base ?? last; }
-      else { type = code === '/399' ? 'emp' : 'info'; amount = last; }
+      // Sin letra de clase: /399 es la empresa; el resto se decide por la columna del importe
+      // (p. ej. «7750 Amortización préstamo» va en DESCUENTOS).
+      else if (code === '/399') { type = 'emp'; amount = last; }
+      else if (byCol.desc != null) { type = 'ded'; amount = byCol.desc; }
+      else if (byCol.abono != null) { type = 'dev'; amount = byCol.abono; }
+      else { type = 'info'; amount = last; }
       concepts.push(normConcept({
         code: `${cls ? cls + ' ' : ''}${code}`,
         name: prettyName(name),
@@ -267,19 +278,24 @@ async function readPayslipPdf(file) {
     }
   }
   if (!concepts.some((k) => k.type === 'dev')) return null;
-  // Periodo: «Enero (01.01.2026 a 31.01.2026)» o «Extra Julio 2026»
-  let year, month, kind = 'monthly';
-  const extra = text.match(new RegExp(`Extra\\s+(${MONTHS.join('|')})\\s+(\\d{4})`, 'i'));
-  const period = text.match(new RegExp(`(${MONTHS.join('|')})\\s*\\(\\d{2}\\.(\\d{2})\\.(\\d{4})`, 'i'));
+  // Periodo: «Enero (01.01.2026 a 31.01.2026)», «Extra Julio 2026» o, en las antiguas,
+  // «Abril 2014» / «JULIO 2014» (mes seguido del año). No vale un mes suelto: los conceptos
+  // también llevan meses («Compl result julio»).
+  let year = null, month = null, kind = 'monthly';
+  const M = MONTHS.join('|');
+  const extra = text.match(new RegExp(`Extra\\s+(${M})\\s+(\\d{4})`, 'i'));
+  const period = text.match(new RegExp(`(${M})\\s*\\(\\d{2}\\.(\\d{2})\\.(\\d{4})`, 'i'));
+  const plain = text.match(new RegExp(`\\b(${M})\\s+((?:19|20)\\d{2})\\b`, 'i'));
   if (extra) { kind = 'extra'; month = MONTHS.indexOf(extra[1].toLowerCase()) + 1; year = Number(extra[2]); }
   else if (period) { month = Number(period[2]); year = Number(period[3]); }
-  else {
-    const mm = text.match(MONTH_RE);
-    month = mm ? MONTHS.indexOf(mm[1].toLowerCase()) + 1 : null;
-    year = Number(text.match(/\b(20\d{2})\b/)?.[1]) || null;
-  }
+  else if (plain) { month = MONTHS.indexOf(plain[1].toLowerCase()) + 1; year = Number(plain[2]); }
+  // Paga extra sin la palabra «Extra»: solo gratificaciones, sin salario base del mes
+  const codes = concepts.filter((k) => k.type === 'dev').map((k) => k.code.split(' ').at(-1));
+  if (kind === 'monthly' && !codes.includes('0080') && codes.some((c) => EXTRA_CODES.includes(c))) kind = 'extra';
   const liq = text.match(/L[ÍI]QUIDO A PERCIBIR[ .…]*€\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i);
-  const company = text.match(/([A-ZÁÉÍÓÚÑ][a-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ&.\- ]{0,60}?,?\s+S\.(?:A|L)\.(?:U\.)?)/)?.[1]?.trim() || '';
+  // Empresa: entre «…SEGURIDAD SOCIAL» y «CIF:» de la cabecera (p. ej. «EADS-CASA (Sociedad Unipersonal)»)
+  const company = (text.match(/SEGURIDAD SOCIAL\s+(.{3,80}?)\s+CIF:/)?.[1]
+    ?? text.match(/([A-ZÁÉÍÓÚÑ][a-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ&.\- ]{0,60}?,?\s+S\.(?:A|L)\.(?:U\.)?)/)?.[1] ?? '').trim();
   return {
     year, month, kind, company,
     liquid: liq ? parseAmount(liq[1]) : 0, // sin cifra (p. ej. abril con acciones): líquido 0
@@ -336,39 +352,49 @@ async function readCertPdf(file) {
     const m = rest.match(new RegExp(`^[\\s.]*${AMT}(?:\\s+${AMT})?(?:\\s+${AMT})?`));
     return m ? m.slice(1, 1 + max).filter(Boolean).map(parseAmount) : [];
   };
-  const [gross = 0, ret = 0] = after(/Retribuciones dinerarias/, 2);
+  // Modelo antiguo (hasta 2016): columnas «Retenciones · Importe», al revés que el actual.
+  const old = /Rendimientos correspondientes al ejercicio\s+Retenciones\s+Importe/i.test(t);
+  const pair = (v) => (old ? [v[1], v[0]] : v); // → [importe, retención]
+  const [gross = 0, ret = 0] = pair(after(/Retribuciones dinerarias/, 2));
   const [especie = 0, iac = 0, iacRep = 0] = after(/Retribuciones en especie/, 3);
-  const [pp = 0] = after(/excepto a seguros colectivos de dependencia\)/);
+  const [pp = 0] = after(/excepto a seguros colectivos de dependencia\)/).length
+    ? after(/excepto a seguros colectivos de dependencia\)/) : after(/Contrib\. Planes Pensiones/);
   const [ss = 0] = after(/Gastos fiscalmente deducibles/);
-  const [exentas = 0] = after(/\(mod\. 190\)/);
-  const [dietas = 0] = after(/cuantías exceptuadas de gravamen del IRPF/);
-  // Atrasos: filas «ejercicio importe retención» entre su cabecera y la nota informativa
-  const a0 = t.search(/Ejercicio de devengo/);
-  const a1 = t.search(/Información de interés para el perceptor\.- La percepción/);
+  const [exentas = 0] = after(/\(mod\. 190\)/).length ? after(/\(mod\. 190\)/) : after(/Otras rentas exentas/);
+  const [dietas = 0] = after(/cuantías exceptuadas de gravamen del IRPF/).length
+    ? after(/cuantías exceptuadas de gravamen del IRPF/) : after(/Dietas y asignaciones para gastos de viaje/);
+  // Atrasos: filas «ejercicio importe retención» (en el antiguo, «ejercicio retención importe»)
+  const a0 = t.search(old ? /Rendimientos de ejercicios anteriores/ : /Ejercicio de devengo/);
+  const a1 = t.search(old ? /Cantidades reintegradas/ : /Información de interés para el perceptor\.- La percepción/);
   const arrears = [];
   if (a0 >= 0 && a1 > a0) {
     for (const m of t.slice(a0, a1).matchAll(new RegExp(`\\b(20\\d{2})\\s+${AMT}(?:\\s+${AMT})?`, 'g'))) {
-      arrears.push({ year: Number(m[1]), gross: parseAmount(m[2]), ret: m[3] ? parseAmount(m[3]) : 0 });
+      const [g, r] = old && m[3] ? [m[3], m[2]] : [m[2], m[3]];
+      arrears.push({ year: Number(m[1]), gross: parseAmount(g), ret: r ? parseAmount(r) : 0 });
     }
   }
-  const year = Number(t.match(/correspondientes al ejercicio (\d{4})/i)?.[1]) || null;
-  const company = t.match(/entidad pagadora .*?razón social [A-Z]\d{7}[A-Z0-9] (.+?) • /)?.[1]?.trim() || '';
+  const year = Number((t.match(/correspondientes al ejercicio (\d{4})/i) ?? t.match(/\bEjercicio (\d{4})/))?.[1]) || null;
+  const company = (t.match(/entidad pagadora .*?razón social [A-Z]\d{7}[A-Z0-9] (.+?) • /)
+    ?? t.match(/Datos del pagador .*?Razón Social [A-Z]\d{7}[A-Z0-9] (.+?) Domicilio/))?.[1]?.trim() || '';
   return { year, company: prettyCompany(company), gross, ret, especie, iac, iacRep, pp, ss, exentas, dietas, arrears };
 }
 const prettyCompany = (s) => (/[a-z]/.test(s) ? s : s.toLowerCase().replace(/(^|[\s(])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()).replace(/\bS\.a\./i, 'S.A.').replace(/\bS\.l\./i, 'S.L.').replace(/\b(And|Of|De|Del|Y)\b/g, (w) => w.toLowerCase()));
 
 // Comparación certificado ↔ nóminas del mismo año. strict: deben coincidir (margen de 1 €);
 // el resto son informativos (la empresa valora la especie y las rentas exentas con criterio fiscal).
-function certCheck(cert, slips) {
-  const r = rentaData(slips);
+function certCheck(cert, slips, pool = slips) {
+  const r = rentaData(slips, pool, cert.year);
+  const cajaNote = r.caja ? `Incluye ${numStr2(r.caja)} € cobrados por caja` : '';
   const rows = [
-    { label: 'Retribuciones dinerarias', slips: r.gross, cert: cert.gross, strict: true },
-    { label: 'Retenciones de IRPF', slips: r.irpf, cert: cert.ret, strict: true },
+    { label: 'Retribuciones dinerarias', slips: round2(r.gross + r.caja), cert: cert.gross, strict: true, note: cajaNote },
+    // La retención de los pagos por caja es una estimación: margen de 1 € + 2 % de lo estimado
+    { label: 'Retenciones de IRPF', slips: round2(r.irpf + r.cajaRet), cert: cert.ret, strict: true, tol: 1 + r.cajaRet * 0.02,
+      note: r.cajaRet ? `Incluye ~${numStr2(r.cajaRet)} € estimados de los pagos por caja` : '' },
     { label: 'Cotizaciones a la Seguridad Social', slips: r.ss, cert: cert.ss, strict: true, note: 'Gastos deducibles' },
     { label: 'Aportación de la empresa al plan de pensiones', slips: r.ppCo, cert: cert.pp, strict: true },
     { label: 'Especie + rentas exentas', slips: r.especie, cert: cert.especie + cert.exentas, strict: false, note: 'Orientativo: comedor, seguros y acciones' },
   ];
-  rows.forEach((x) => { x.diff = round2(x.slips - x.cert); x.ok = Math.abs(x.diff) < 1; });
+  rows.forEach((x) => { x.diff = round2(x.slips - x.cert); x.ok = Math.abs(x.diff) < (x.tol ?? 1); });
   return { rows, ok: rows.filter((x) => x.strict).every((x) => x.ok), count: slips.length };
 }
 
@@ -1059,7 +1085,7 @@ function renderSummary() {
     payslips: money(t.net),
     concepts: '',
     renta: (() => {
-      const pairs = profiles.flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certCheck(c, p.slips.filter((x) => x.year === selYear))));
+      const pairs = profiles.flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certCheck(c, p.slips.filter((x) => x.year === selYear), p.slips)));
       if (!pairs.length) return '';
       return pairs.every((x) => x.ok) ? `<span class="pos small-status">${icon('check', 14)} cuadra</span>` : '<span class="neg small-status">no cuadra</span>';
     })(),
@@ -1207,6 +1233,9 @@ const CATALOG = {
   '5599': { name: 'Horas de conflicto laboral (no cotizan)' },
   '0500': { name: 'Descuento de horas de falta en la paga extra' },
   '3170': { name: 'Reparto de beneficios' },
+  '7999': { name: 'Percepciones por caja (cobradas fuera de la nómina)' },
+  '5569': { name: 'Días de compensación' },
+  '2498': { name: 'Ayuda al transporte' },
   // Descuentos
   '/398': { name: 'Cotización a la Seguridad Social' },
   '/401': { name: 'Retención de IRPF' },
@@ -1215,6 +1244,8 @@ const CATALOG = {
   '3760': { name: 'Compra de acciones (ESOP)' },
   '3917': { name: 'Descuento Grupo de Empresa' },
   '/561': { name: 'Crédito (saldo que pasa al mes siguiente)' },
+  '3682': { name: 'Devolución de adelanto' },
+  '7750': { name: 'Amortización del préstamo de empresa' },
   '/563': { name: 'Pendiente del mes anterior' },
   // Solo base de cotización / en especie
   '/34C': { name: 'Prorrata de pagas extra' },
@@ -1228,6 +1259,7 @@ const CATALOG = {
   '3992': { name: 'Especie no repercutida', especie: true },
   '777E': { name: 'Seguro médico de empresa', especie: true },
   '778E': { name: 'Seguro médico (base de Seguridad Social)' },
+  '775E': { name: 'Intereses del préstamo de empresa', especie: true },
   // Empresa
   '/399': { name: 'Cotización de la empresa a la Seguridad Social' },
   '/342': { name: 'Ajuste de base: contingencias comunes' },
@@ -1619,11 +1651,23 @@ function renderConcepts() {
 // ---------- Datos para la Renta ----------
 // Sumas del año que pide la declaración, sacadas de los conceptos de las nóminas.
 // Es una referencia: lo oficial es el certificado de retenciones que da la empresa.
-function rentaData(slips) {
+// Percepciones por caja (7999): se cobran fuera de la nómina, que solo las anota (a veces en la del
+// mes siguiente). Hacienda las cuenta en el año en que se cobraron (su mes de origen) y les aplica
+// retención, que se estima con el % de la nómina donde aparecen. pool: todas las nóminas de la persona.
+function cajaOf(year, pool) {
+  let amount = 0, ret = 0;
+  pool.filter((s) => s.year === year || s.year === year + 1).forEach((s) => s.concepts.forEach((k) => {
+    if (k.code.split(' ').at(-1) !== '7999' || Number(originYM(k).slice(0, 4)) !== year) return;
+    amount += k.amount;
+    ret += (k.amount * (s.irpfPct ?? 0)) / 100;
+  }));
+  return { amount: round2(amount), ret: round2(ret) };
+}
+function rentaData(slips, pool = slips, year = slips[0]?.year) {
   const ks = yearConcepts(slips);
   const by = (fn) => sumBy(ks.filter(fn), (k) => k.amount);
   const t = aggregate(slips);
-  const year = slips[0]?.year;
+  const caja = cajaOf(year, pool);
   const prevYears = ks.filter((k) => k.type === 'dev' && originYM(k) && Number(originYM(k).slice(0, 4)) < year);
   return {
     gross: t.gross,
@@ -1635,12 +1679,14 @@ function rentaData(slips) {
     ppEmp: by((k) => catalogOf(k).renta === 'ppEmp'),
     arrears: groupConcepts(prevYears.map((k) => ({ ...k, type: 'dev' }))),
     arrearsTotal: sumBy(prevYears, (k) => k.amount),
+    caja: caja.amount,
+    cajaRet: caja.ret,
   };
 }
 // Certificado del año frente a las nóminas de esa persona: casilla a casilla, con la diferencia.
 function certSection(p, cert) {
   const slips = p.slips.filter((s) => s.year === cert.year);
-  const chk = certCheck(cert, slips);
+  const chk = certCheck(cert, slips, p.slips);
   const who = data.profiles.length > 1 ? ` · ${esc(p.name)}` : '';
   const status = !chk.count
     ? `<p class="small warn-line">No hay nóminas de ${cert.year}: súbelas para comprobar el certificado.</p>`
@@ -1680,14 +1726,14 @@ function certSection(p, cert) {
 
 function renderRenta() {
   const slips = slipsOfYear(selYear, viewProfiles());
-  const r = rentaData(slips);
+  const r = rentaData(slips, allSlips(viewProfiles()), selYear);
   const row = (label, v, note = '', neg = false) => `
     <div class="cat-row"><span class="cat-name">${label}${note ? `<small class="muted">${note}</small>` : ''}</span><span class="amount ${neg && v ? 'neg' : ''}">${money(neg ? -v : v)}</span></div>`;
   const el = document.createElement('div');
   el.innerHTML = `
     <section class="hero">
       <p class="label">Rendimientos del trabajo ${selYear}</p>
-      <p class="net amount">${money(r.gross + r.especie + r.ppCo)}</p>
+      <p class="net amount">${money(r.gross + r.caja + r.especie + r.ppCo)}</p>
       <p class="muted small">Dinerarios + en especie + aportación de la empresa al plan, según tus nóminas.</p>
     </section>
     <section class="summary">
@@ -1701,6 +1747,7 @@ function renderRenta() {
       <p class="muted small amort-note">El que da la empresa para la Renta. Se comprobará si cuadra con la suma de tus nóminas de ${selYear}.</p></section>`}
     <section class="group"><h2>Ingresos</h2><div class="list ts-list">
       ${row('Retribuciones dinerarias', r.gross, 'Todos los abonos de las nóminas')}
+      ${r.caja ? row('Percepciones por caja', r.caja, `Cobradas fuera de la nómina en ${selYear}; retención estimada ${numStr2(r.cajaRet)} €`) : ''}
       ${row('Retribuciones en especie', r.especie, 'Comedor, seguros, acciones…')}
       ${row('Aportación de la empresa al plan de pensiones', r.ppCo, 'Se imputa como retribución en especie')}
     </div></section>
