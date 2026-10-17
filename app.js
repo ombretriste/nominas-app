@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.5.1';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -405,112 +405,173 @@ function certCheck(cert, slips, pool = slips) {
 }
 
 // ---------- Declaración de la Renta presentada (Modelo 100 de la AEAT) ----------
-// Se guardan solo las casillas con importe (número de casilla → valor), la fecha de presentación
-// y el PDF. No se copian nombres, NIF ni direcciones a los datos.
+// La numeración de las casillas cambia según el año (0003 en 2018–2023, 0002 en 2017, 001 en
+// 2015–2016, 01 en el borrador de 2014), así que cada dato se busca por su etiqueta, que no cambia.
+// Se guardan solo esos importes (v), su número de casilla de ese año (b) y la fecha de presentación;
+// no se copian nombres, NIF ni direcciones.
+const DECL_FIELDS = [
+  ['gross', /Retribuciones dinerarias/],
+  ['especie', /Valoración (?:de la )?retribución en especie/],
+  ['iac', /Ingresos a cuenta de (?:la )?retribución en especie/],
+  ['pp', /Contribuciones empresariales a Planes de Pensiones y Mutualidades de Previsión Social/],
+  ['ingresosTrabajo', /Total ingresos íntegros computables/],
+  ['ss', /Cotizac(?:\.|iones) (?:a la )?Seguridad Social[^\d]{0,140}?Hu[ée]rfanos/],
+  ['union', /Cuotas satisfechas a sindicatos/],
+  ['rnTrabajo', /Rendimiento neto reducido/], // el primero es el del trabajo
+  ['capital', /Suma de rendimientos de capital mobiliario a integrar en la base imponible del ahorro/],
+  ['ganancias', /Saldo neto positivo de ganan.{0,90}?ahorro/],
+  ['ppTrab', /Aportaciones del trabajador al PP de la empresa/],
+  ['ppRed', /Reducción por aportaciones[^\d]{0,120}(?:Importe que se aplica|\(régimen general\))/],
+  ['blg', /Base liquidable general sometida a gravamen/],
+  ['bla', /Base liquidable del ahorro/],
+  ['tme', /Tipo medio estatal/],
+  ['tma', /Tipo medio autonómico/],
+  ['cie', /Cuota íntegra estatal/],
+  ['cia', /Cuota íntegra autonómica/],
+  ['cle', /Cuota líquida estatal/],
+  ['cla', /Cuota líquida autonómica/],
+  ['cuotaLiq', /Cuota líquida incrementada total/],
+  ['retTrabajo', /Por rendimientos del trabajo/],
+  ['pagosCuenta', /Total pagos a cuenta/],
+  ['cuotaDif', /Cuota diferencial/],
+  ['result', /Resultado de la declaración(?! complementaria)|Resultado \[\(/],
+  ['perdidas', /Pendiente de aplicación en ejercicios futuros/],
+];
+// Casillas del modelo 2018–2023 (para declaraciones guardadas con la versión 0.5.0)
+const DECL_BOX_2023 = { '0003': 'gross', '0004': 'especie', '0005': 'iac', '0008': 'pp', '0012': 'ingresosTrabajo', '0013': 'ss',
+  '0014': 'union', '0025': 'rnTrabajo', '0041': 'capital', '0424': 'ganancias', '0426': 'ppTrab', '0492': 'ppRed', '0505': 'blg',
+  '0510': 'bla', '0534': 'tme', '0535': 'tma', '0545': 'cie', '0546': 'cia', '0570': 'cle', '0571': 'cla', '0587': 'cuotaLiq',
+  '0596': 'retTrabajo', '0609': 'pagosCuenta', '0610': 'cuotaDif', '0670': 'result', '1263': 'perdidas' };
+
 function normDecl(d) {
-  const c = {};
-  Object.entries(d.c || {}).forEach(([k, v]) => { if (/^\d{4}$/.test(k) && Number.isFinite(Number(v))) c[k] = Number(v); });
+  const v = {}, b = {};
+  Object.entries(d.v || {}).forEach(([k, x]) => { if (Number.isFinite(Number(x))) v[k] = Number(x); });
+  Object.entries(d.b || {}).forEach(([k, x]) => { if (/^[\dA-Z]{2,4}$/.test(x)) b[k] = x; });
+  // Formato antiguo (v0.5.0): casillas del modelo 2023 → campos
+  Object.entries(d.c || {}).forEach(([box, x]) => { const k = DECL_BOX_2023[box]; if (k && !(k in v)) { v[k] = Number(x); b[k] = box; } });
   return {
     id: d.id || uid(),
     year: Number(d.year) || new Date().getFullYear() - 1,
     presented: d.presented || '', // AAAA-MM-DD
-    c,
+    draft: !!d.draft,             // borrador (no presentada)
+    v, b,
     file: d.file && d.file.id ? { id: d.file.id, name: d.file.name || 'declaración', type: d.file.type || '', size: Number(d.file.size) || 0 } : null,
   };
 }
 
-// Devuelve { year, presented, c } o null si el PDF no es un Modelo 100.
+// Devuelve { year, presented, draft, v, b } o null si el PDF no es una declaración de la Renta.
 async function readDeclPdf(file) {
   const t = await pdfText(file);
-  if (!/Modelo\s*100\b/.test(t) || !/Impuesto sobre la Renta de las Personas F[ií]sicas/i.test(t)) return null;
-  const year = Number(t.match(/Modelo\s*100\s+(?:Impuesto sobre la Renta de las Personas F[ií]sicas\s+)?Ejercicio\s+(\d{4})/i)?.[1]
-    ?? t.match(/Ejercicio\s+(\d{4})/)?.[1]) || null;
-  const p = t.match(/Presentación realizada el:\s*(\d{2})-(\d{2})-(\d{4})/);
-  const c = {};
-  // Cada importe va seguido de su número de casilla: «73.954,73 0003». Vale la primera aparición.
-  for (const m of t.matchAll(/(-?\d{1,3}(?:\.\d{3})*,\d{2})\s+(\d{4})(?!\d)/g)) if (!(m[2] in c)) c[m[2]] = pdfNum(m[1]);
-  if (!Object.keys(c).length) return null;
-  return { year, presented: p ? `${p[3]}-${p[2]}-${p[1]}` : '', c };
+  if (/Certificado de retenciones/i.test(t)) return null;
+  if (!/Renta de las Personas F[ií]sicas|I\.R\.P\.F\./i.test(t) || !/Modelo|MODELO|BORRADOR DE DECLARACI/.test(t)) return null;
+  const AMT = /-?\d{1,3}(?:\.\d{3})*,\d{2}/;
+  const v = {}, b = {};
+  for (const [key, label] of DECL_FIELDS) {
+    const lm = t.match(label);
+    if (!lm) continue;
+    const rest = t.slice(lm.index + lm[0].length, lm.index + lm[0].length + 400);
+    const am = rest.match(AMT);
+    if (!am) continue;
+    // Entre la etiqueta y el importe no puede haber otra etiqueta (palabras en minúscula):
+    // si el dato está vacío, el siguiente importe es de otra casilla.
+    const between = rest.slice(0, am.index);
+    // (lo que va entre corchetes es la fórmula de la casilla: «[suma de (592) a (606)]»)
+    if (/[a-záéíóúñ]{2,}/.test(between.replace(/\[[^\]]*\]/g, '')) || between.length > 250) continue;
+    v[key] = pdfNum(am[0]);
+    // Número de casilla: delante del importe (borrador de 2014) o justo detrás (resto de años)
+    const before = between.replace(/\[[^\]]*\]/g, '').match(/(\d{2,4}|[A-Z]{2,4})\s*$/);
+    const after = rest.slice(am.index + am[0].length).match(/^\s*(\d{3,4})(?![\d,])/);
+    if (after) b[key] = after[1];
+    else if (before) b[key] = before[1];
+  }
+  if (v.gross == null || (v.cie == null && v.blg == null && v.result == null)) return null;
+  if (v.result == null && v.cuotaDif != null) v.result = v.cuotaDif;
+  const year = Number((t.match(/Modelo\s*100\s+Ejercicio\s+(\d{4})/i) ?? t.match(/I\.R\.P\.F\.\s+EJERCICIO\s+(\d{4})/)
+    ?? t.match(/\bEjercicio\s*(20\d{2})\b/i) ?? t.match(/ejercicio (20\d{2}) de la que se derive/i))?.[1]) || null;
+  const p = t.match(/(\d{2})-(\d{2})-(\d{4})\s+a las\s+\d{1,2}[:.]\d{2}/);
+  return { year, presented: p ? `${p[3]}-${p[2]}-${p[1]}` : '', draft: /BORRADOR DE DECLARACI/.test(t), v, b };
 }
-const cas = (d, ...codes) => round2(codes.reduce((a, k) => a + (d.c[k] || 0), 0));
+const dv = (d, ...keys) => round2(keys.reduce((a, k) => a + (d.v[k] || 0), 0));
+const dhas = (d, ...keys) => keys.some((k) => d.v[k] != null);
 
-// Casillas que deben coincidir con el certificado de la empresa y con las nóminas del ejercicio.
+// Datos que deben coincidir con el certificado de la empresa y con las nóminas del ejercicio.
 function declCheck(d, cert, slips, pool) {
   const r = rentaData(slips, pool, d.year);
   const rows = [];
-  const add = (label, box, value, ref, src, tol = 1) => {
+  const add = (label, key, ref, src, tol = 1) => {
+    if (d.v[key] == null && !ref) return; // ni en la declaración ni en la referencia
+    const value = dv(d, key);
     const diff = ref == null ? null : round2(value - ref);
-    rows.push({ label, box, value, ref, src, diff, ok: diff != null && Math.abs(diff) < tol });
+    rows.push({ label, box: d.b[key] || '', value, ref, src, diff, ok: diff != null && Math.abs(diff) < tol });
   };
   if (cert) {
-    add('Retribuciones dinerarias', '0003', cas(d, '0003'), cert.gross, 'Certificado');
-    add('Valoración de la especie', '0004', cas(d, '0004'), cert.especie, 'Certificado');
-    add('Ingresos a cuenta de la especie', '0005', cas(d, '0005'), cert.iac, 'Certificado');
-    add('Aportación de la empresa al plan', '0008', cas(d, '0008'), cert.pp, 'Certificado');
-    add('Seguridad Social', '0013', cas(d, '0013'), cert.ss, 'Certificado');
+    add('Retribuciones dinerarias', 'gross', cert.gross, 'Certificado');
+    add('Valoración de la especie', 'especie', cert.especie, 'Certificado');
+    add('Ingresos a cuenta de la especie', 'iac', cert.iac, 'Certificado');
+    add('Aportación de la empresa al plan', 'pp', cert.pp, 'Certificado');
+    add('Seguridad Social', 'ss', cert.ss, 'Certificado');
     // Pagos a cuenta del trabajo = retenciones + ingresos a cuenta de la especie
-    add('Retenciones del trabajo', '0596', cas(d, '0596'), round2(cert.ret + cert.iac), 'Certificado');
+    add('Retenciones del trabajo', 'retTrabajo', round2(cert.ret + cert.iac), 'Certificado');
   } else if (slips.length) {
-    add('Retribuciones dinerarias', '0003', cas(d, '0003'), round2(r.gross + r.caja), 'Nóminas');
-    add('Seguridad Social', '0013', cas(d, '0013'), r.ss, 'Nóminas');
-    add('Aportación de la empresa al plan', '0008', cas(d, '0008'), r.ppCo, 'Nóminas');
+    add('Retribuciones dinerarias', 'gross', round2(r.gross + r.caja), 'Nóminas');
+    add('Seguridad Social', 'ss', r.ss, 'Nóminas');
+    add('Aportación de la empresa al plan', 'pp', r.ppCo, 'Nóminas');
   }
   if (slips.length) {
-    if (d.c['0014'] != null || r.union) add('Cuotas sindicales', '0014', cas(d, '0014'), r.union, 'Nóminas');
-    if (d.c['0426'] != null || r.ppEmp) add('Tu aportación al plan de empresa', '0426', cas(d, '0426'), r.ppEmp, 'Nóminas');
+    add('Cuotas sindicales', 'union', r.union, 'Nóminas');
+    if (d.v.ppTrab != null) add('Tu aportación al plan de empresa', 'ppTrab', r.ppEmp, 'Nóminas');
   }
   return { rows, ok: rows.length > 0 && rows.every((x) => x.ok), hasCert: !!cert, count: slips.length };
 }
 
-// Resumen rápido de la declaración y comprobación casilla a casilla.
+// Resumen rápido de la declaración y comprobación dato a dato.
 function declSection(p, d) {
   const cert = p.certs.find((c) => c.year === d.year) ?? null;
   const chk = declCheck(d, cert, p.slips.filter((s) => s.year === d.year), p.slips);
-  const result = d.c['0670'] ?? d.c['0695'] ?? null;
+  const result = d.v.result ?? null;
   const refund = result != null && result < 0;
   const who = data.profiles.length > 1 ? ` · ${esc(p.name)}` : '';
   const line = (label, v, note = '', cls = '') => (v == null ? '' : `
     <div class="cat-row"><span class="cat-name">${label}${note ? `<small class="muted">${note}</small>` : ''}</span><span class="amount ${cls}">${money(v)}</span></div>`);
-  const has = (...k) => k.some((x) => d.c[x] != null);
-  const cuotaIntegra = has('0545', '0546') ? cas(d, '0545', '0546') : null;
-  const cuotaLiquida = has('0587') ? cas(d, '0587') : has('0570', '0571') ? cas(d, '0570', '0571') : null;
+  const cuotaIntegra = dhas(d, 'cie', 'cia') ? dv(d, 'cie', 'cia') : null;
+  const cuotaLiquida = dhas(d, 'cuotaLiq') ? dv(d, 'cuotaLiq') : dhas(d, 'cle', 'cla') ? dv(d, 'cle', 'cla') : null;
   const deducciones = cuotaIntegra != null && cuotaLiquida != null ? round2(cuotaIntegra - cuotaLiquida) : null;
-  const tipoMedio = has('0534', '0535') ? cas(d, '0534', '0535') : null;
+  const tipoMedio = dhas(d, 'tme', 'tma') ? dv(d, 'tme', 'tma') : null;
   const presented = d.presented ? new Date(d.presented).toLocaleDateString(LOCALE, { day: 'numeric', month: 'long', year: 'numeric' }) : '';
   const status = !chk.rows.length
     ? `<p class="small muted">Sube el certificado o las nóminas de ${d.year} para comprobarla.</p>`
     : chk.ok
       ? `<p class="small ok-line">${icon('check', 14)} Cuadra con ${chk.hasCert ? 'el certificado' : 'las nóminas'}${chk.hasCert && chk.count ? ' y las nóminas' : ''}</p>`
-      : '<p class="small warn-line">Hay casillas que no cuadran: revisa las diferencias.</p>';
+      : '<p class="small warn-line">Hay datos que no cuadran: revisa las diferencias.</p>';
   return `
     <section class="group decl-group">
-      <h2>Declaración de la Renta ${d.year}${who}</h2>
+      <h2>${d.draft ? 'Borrador de la Renta' : 'Declaración de la Renta'} ${d.year}${who}</h2>
       <div class="list cert-card decl-card">
         <div class="decl-head">
           <span class="label">${result == null ? 'Resultado' : refund ? 'A devolver' : 'A ingresar'}</span>
           <span class="decl-result ${result == null ? '' : refund ? 'pos' : 'neg'}">${result == null ? '—' : money(Math.abs(result))}</span>
-          <span class="muted small">${presented ? `Presentada el ${presented}` : 'Modelo 100'}${tipoMedio != null ? ` · tipo medio ${isPrivate() ? MASK : numPct(tipoMedio)}` : ''}</span>
+          <span class="muted small">${presented ? `Presentada el ${presented}` : d.draft ? 'Borrador (Modelo 100)' : 'Modelo 100'}${tipoMedio != null ? ` · tipo medio ${isPrivate() ? MASK : numPct(tipoMedio)}` : ''}</span>
         </div>
         <div class="cert-extra decl-lines">
-          ${line('Rendimiento neto del trabajo', d.c['0022'] ?? d.c['0025'], 'Tras Seguridad Social, cuotas sindicales y otros gastos')}
-          ${line('Rendimientos del capital mobiliario', d.c['0041'], 'Dividendos, intereses… (neto)')}
-          ${line('Ganancias y pérdidas patrimoniales', d.c['0424'], 'Saldo neto (venta de acciones, fondos…)')}
-          ${line('Reducción por planes de pensiones', d.c['0492'])}
-          ${line('Base liquidable general', d.c['0505'] ?? d.c['0500'])}
-          ${line('Base liquidable del ahorro', d.c['0510'])}
+          ${line('Rendimiento neto del trabajo', d.v.rnTrabajo, 'Tras Seguridad Social, cuotas sindicales y otros gastos')}
+          ${line('Rendimientos del capital mobiliario', d.v.capital, 'Dividendos, intereses… (neto)')}
+          ${line('Ganancias y pérdidas patrimoniales', d.v.ganancias, 'Saldo neto (venta de acciones, fondos…)')}
+          ${line('Reducción por planes de pensiones', d.v.ppRed)}
+          ${line('Base liquidable general', d.v.blg)}
+          ${line('Base liquidable del ahorro', d.v.bla)}
           ${line('Cuota íntegra', cuotaIntegra, 'Estatal + autonómica')}
-          ${deducciones ? line('Deducciones', -deducciones, 'Donativos, autonómicas…', 'neg') : ''}
+          ${deducciones ? line('Deducciones', -deducciones, 'Vivienda, donativos, autonómicas…', 'neg') : ''}
           ${line('Cuota líquida', cuotaLiquida)}
-          ${line('Retenciones y pagos a cuenta', d.c['0609'] != null ? -d.c['0609'] : null, '', 'neg')}
+          ${line('Retenciones y pagos a cuenta', d.v.pagosCuenta != null ? -d.v.pagosCuenta : null, '', 'neg')}
           ${line(refund ? 'Resultado: a devolver' : 'Resultado: a ingresar', result == null ? null : Math.abs(result), '', refund ? 'pos' : 'neg')}
-          ${d.c['1263'] ? line('Pérdidas pendientes de compensar', d.c['1263'], 'Para ejercicios futuros') : ''}
+          ${d.v.perdidas ? line('Pérdidas pendientes de compensar', d.v.perdidas, 'Para ejercicios futuros') : ''}
         </div>
         <div class="decl-check-head">${status}</div>
         ${chk.rows.length ? `
-        <div class="amort-cols cert-cols"><span>Casilla</span><span>Declaración</span><span>${chk.hasCert ? 'Certif./nóminas' : 'Nóminas'}</span><span>Dif.</span></div>
+        <div class="amort-cols cert-cols"><span>Dato</span><span>Declaración</span><span>${chk.hasCert ? 'Certif./nóminas' : 'Nóminas'}</span><span>Dif.</span></div>
         ${chk.rows.map((x) => `
         <div class="amort-row cert-cols">
-          <span class="cc-label">${esc(x.label)}<small class="muted">${x.box} · según ${x.src.toLowerCase()}</small></span>
+          <span class="cc-label">${esc(x.label)}<small class="muted">${x.box ? `Casilla ${x.box} · ` : ''}según ${x.src.toLowerCase()}</small></span>
           <span>${numStr2(x.value)}</span><span>${numStr2(x.ref)}</span>
           <span class="${x.ok ? 'pos' : 'neg'}">${x.ok ? icon('check', 13) : (x.diff > 0 ? '+' : '') + numStr2(x.diff)}</span>
         </div>`).join('')}` : ''}
