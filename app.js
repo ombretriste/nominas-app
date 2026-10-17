@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '0.5.1';
+const APP_VERSION = '1.0.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -153,6 +153,7 @@ function normSlip(s) {
     irpfPct: s.irpfPct == null ? null : Number(s.irpfPct),
     file: s.file && s.file.id ? { id: s.file.id, name: s.file.name || 'nómina', type: s.file.type || '', size: Number(s.file.size) || 0 } : null,
     demo: !!s.demo,
+    generic: !!s.generic, // leída con el lector general (solo totales)
   };
 }
 // Concepto de una nómina. type: 'dev' (abono), 'ded' (descuento), 'info' (solo base de cotización
@@ -303,6 +304,79 @@ async function readPayslipPdf(file) {
     concepts,
   };
 }
+// ---------- Lector general de nóminas (cualquier empresa) ----------
+// Solo se usa si el PDF no tiene el formato de recibo SAP de arriba. Se apoya en el modelo oficial
+// de recibo de salarios (Orden ESS/2098/2014), común a todas las empresas: «Total devengado»,
+// «Total a deducir», «Líquido total a percibir», IRPF y las cotizaciones del trabajador
+// (contingencias comunes, desempleo, formación profesional, MEI…). Lee los totales, no cada
+// concepto, y siempre se enseña al usuario para que lo revise antes de guardar.
+const G_AMT = /\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}/g;
+function gAmountsAfter(t, re, { from = 0, to = t.length, max = 3 } = {}) {
+  const slice = t.slice(from, to);
+  const m = slice.match(re);
+  if (!m) return null;
+  const at = from + m.index;
+  const rest = t.slice(at + m[0].length, Math.min(to, at + m[0].length + 160));
+  const out = [];
+  let last = 0;
+  for (const am of rest.matchAll(G_AMT)) {
+    // Entre la etiqueta y el importe no puede haber otra etiqueta (palabras de 4 o más letras;
+    // se admite algo como «(A-B)»). Tras el primer importe, cualquier letra es ya otra línea.
+    const gap = rest.slice(last, am.index);
+    if (out.length ? /[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(gap) : /[A-Za-zÁÉÍÓÚÑáéíóúñ]{4,}/.test(gap)) break;
+    const pct = /^\s*%/.test(rest.slice(am.index + am[0].length));
+    out.push({ v: parseAmount(am[0]), pct });
+    last = am.index + am[0].length;
+    if (out.length >= max) break;
+  }
+  return out.length ? { at, values: out } : null;
+}
+// Importe de una línea «concepto [base] [%] importe»: el último que no sea un porcentaje.
+function gLineAmount(found) {
+  if (!found) return null;
+  const money = found.values.filter((x) => !x.pct);
+  const pct = found.values.find((x) => x.pct)?.v ?? (found.values.length > 1 && found.values[0].v <= 60 ? found.values[0].v : null);
+  const v = money.length ? money.at(-1).v : null;
+  return v == null ? null : { v, pct };
+}
+
+async function readGenericPayslipPdf(file) {
+  const t = await pdfText(file);
+  if (!/L[ÍI]QUIDO|NETO A PERCIBIR/i.test(t) || !/DEVENG|BRUTO/i.test(t)) return null;
+  const netF = gAmountsAfter(t, /L[ÍI]QUIDO\s+(?:TOTAL\s+)?A\s+(?:PERCIBIR|COBRAR)|TOTAL\s+L[ÍI]QUIDO|NETO\s+A\s+PERCIBIR/i);
+  const grossF = gAmountsAfter(t, /TOTAL\s+DEVENGADO|TOTAL\s+DEVENGOS|TOTAL\s+BRUTO|DEVENGOS\s+TOTALES/i);
+  const net = gLineAmount(netF)?.v, gross = gLineAmount(grossF)?.v;
+  if (net == null || gross == null) return null;
+  // Las cotizaciones de la empresa suelen ir después del líquido: se busca solo antes.
+  const to = netF.at;
+  const dedF = gAmountsAfter(t, /TOTAL\s+A\s+DEDUCIR|TOTAL\s+DEDUCCIONES|TOTAL\s+DESCUENTOS/i, { to });
+  const ded = gLineAmount(dedF)?.v ?? round2(gross - net);
+  const irpfL = gLineAmount(gAmountsAfter(t, /RETENCI[ÓO]N\s+(?:A\s+CUENTA\s+)?(?:DEL?\s+)?I\.?\s?R\.?\s?P\.?\s?F\.?|IMPUESTO\s+SOBRE\s+LA\s+RENTA(?:\s+DE\s+LAS\s+PERSONAS\s+F[ÍI]SICAS)?|\bI\.?R\.?P\.?F\.?(?![A-Z])/i, { to }));
+  const ssLabels = [/CONTINGENCIAS\s+COMUNES/i, /DESEMPLEO/i, /FORMACI[ÓO]N\s+PROFESIONAL/i, /\bM\.?E\.?I\.?\b|MECANISMO\s+DE\s+EQUIDAD/i, /HORAS\s+EXTRA(?:ORDINARIAS|S)?(?:\s+(?:FUERZA\s+MAYOR|ESTRUCTURALES|RESTO))?/i];
+  const totalAport = gLineAmount(gAmountsAfter(t, /TOTAL\s+APORTACIONES/i, { to }))?.v;
+  const ss = totalAport ?? round2(ssLabels.reduce((a, re) => a + (gLineAmount(gAmountsAfter(t, re, { to }))?.v || 0), 0));
+  const irpf = irpfL?.v ?? 0;
+  const other = round2(Math.max(0, ded - irpf - ss));
+  // Periodo: «del 01/03/2025 al 31/03/2025», «MARZO 2025», «marzo de 2025» o «03/2025»
+  let year = null, month = null;
+  const range = t.match(/(\d{1,2})[\/.-](\d{1,2})[\/.-]((?:19|20)\d{2})\s*(?:al?|-|hasta)\s*\d{1,2}[\/.-]\d{1,2}[\/.-](?:19|20)\d{2}/i);
+  const named = t.match(new RegExp(`\\b(${MONTHS.join('|')}|setiembre)\\b\\s*(?:de\\s+|\\/\\s*)?((?:19|20)\\d{2})\\b`, 'i'));
+  const mmyy = t.match(/PER[ÍI]ODO[^\d]{0,30}(\d{1,2})[\/-]((?:19|20)\d{2})/i);
+  if (range) { month = Number(range[2]); year = Number(range[3]); }
+  else if (named) { month = MONTHS.indexOf(named[1].toLowerCase().replace('setiembre', 'septiembre')) + 1; year = Number(named[2]); }
+  else if (mmyy) { month = Number(mmyy[1]); year = Number(mmyy[2]); }
+  if (!(month >= 1 && month <= 12)) month = null;
+  const extra = /(?:PAGA|GRATIFICACI[ÓO]N)\s+(?:EXTRA|EXTRAORDINARIA)/i.test(t) && !/SALARIO\s+BASE/i.test(t);
+  const company = (t.match(/EMPRESA:?\s+(.{3,60}?)\s+(?:DOMICILIO|C\.?I\.?F|N\.?I\.?F|C\.?C\.?C|CENTRO)/i)?.[1]
+    ?? t.match(/([A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ&.,\- ]{1,60}?,?\s+S\.\s?(?:A|L)\.(?:U\.)?)/)?.[1] ?? '').trim();
+  return {
+    generic: true, year, month, kind: extra ? 'extra' : 'monthly', company: prettyCompany(company),
+    gross, irpf, ss, other, liquid: net, irpfPct: irpfL?.pct ?? null,
+    // ¿Cuadran los totales leídos entre sí? (bruto − descuentos = líquido)
+    check: dedF != null && Math.abs(gross - ded - net) < 0.02 && Math.abs(gross - irpf - ss - other - net) < 0.02,
+  };
+}
+
 // ---------- Certificado de retenciones (modelo de la AEAT) ----------
 // Lo da la empresa cada año para la Renta. Se guardan sus casillas y se comparan con la suma
 // de las nóminas de ese ejercicio.
@@ -1540,7 +1614,7 @@ function renderSlip(s, p) {
   const emp = of('emp');
   const especie = info.filter((g) => isEspecie(g.k));
   const baseOnly = info.filter((g) => !isEspecie(g.k));
-  const check = s.liquid != null && has
+  const check = s.liquid != null && (has || s.generic)
     ? Math.abs(st.net - s.liquid) < 0.01
       ? `<p class="muted small ok-line">${icon('check', 14)} Coincide con el líquido de la nómina</p>`
       : `<p class="small warn-line">El cálculo (${money(st.net)}) no coincide con el líquido impreso (${money(s.liquid)}).</p>`
@@ -1573,7 +1647,9 @@ function renderSlip(s, p) {
       `<p class="muted small fold-note">Prorratas y otros importes que solo cuentan para la Seguridad Social.</p><div class="list ts-list">${conceptRows(baseOnly, s)}</div>`) : ''}
     ${emp.length ? foldGroup('slip-emp', 'Aportación de la empresa', money(sumBy(emp, (g) => g.amount)),
       `<div class="list ts-list">${conceptRows(emp, s)}</div>`) : ''}` : `
-    <section class="group"><h2>Conceptos</h2><div class="list ts-list"><p class="empty muted small">Sin desglose: sube el PDF de la nómina y se leerán sus conceptos.</p></div></section>`}
+    <section class="group"><h2>Conceptos</h2><div class="list ts-list"><p class="empty muted small">${s.generic
+      ? 'Leída por sus totales con el lector general (formato de nómina no reconocido): sin detalle por conceptos.'
+      : 'Sin desglose: sube el PDF de la nómina y se leerán sus conceptos.'}</p></div></section>`}
     <section class="group">
       <h2>Documento</h2>
       ${s.file ? `
@@ -1600,7 +1676,7 @@ function renderSlip(s, p) {
 // Si un archivo no se puede leer (una foto, otro formato), se abre el formulario para meterla a mano.
 async function importFiles(fileList, owner) {
   const list = [...fileList];
-  const done = [], skipped = [], manual = [], certsDone = [], declsDone = [];
+  const done = [], skipped = [], review = [], certsDone = [], declsDone = [];
   showToast(`Leyendo ${list.length === 1 ? 'el archivo' : `${list.length} archivos`}…`);
   const parsed = [];
   for (const f of list) {
@@ -1635,8 +1711,14 @@ async function importFiles(fileList, owner) {
         }
       } catch (e) { console.warn(e); }
       try { r = await readPayslipPdf(f); } catch (e) { console.warn(e); }
+      // Formato desconocido: lector general de totales, que se revisa antes de guardar
+      if (!r || !r.year || !r.month) {
+        let g = null;
+        try { g = await readGenericPayslipPdf(f); } catch (e) { console.warn(e); }
+        if (g) { review.push({ file: f, prefill: g }); continue; }
+      }
     }
-    if (!r || !r.year || !r.month) { manual.push(f); continue; }
+    if (!r || !r.year || !r.month) { review.push({ file: f, prefill: null }); continue; }
     parsed.push({ f, r });
   }
   if (parsed.length) {
@@ -1670,35 +1752,44 @@ async function importFiles(fileList, owner) {
     skipped.length ? `ya estaban: ${skipped.join(', ')}` : '',
   ].filter(Boolean).join(' · ');
   if (msg) showToast(msg, { warn: !done.length });
-  if (manual.length === 1) {
-    openSlipSheet(null, owner, manual[0]);
-  } else if (manual.length > 1) {
-    showToast(`${manual.length} archivos no se pudieron leer: ${manual.map((f) => f.name).join(', ')}. Súbelos de uno en uno para meterlos a mano.`, { warn: true });
-  }
   if ((certsDone.length || declsDone.length) && !done.length) {
     selYear = declsDone[0] ?? certsDone[0];
     go('renta', screen === 'renta' ? null : 'forward');
-  } else if (done.length === 1 && !manual.length) go(`slip:${done[0].id}`, 'forward');
+  } else if (done.length === 1 && !review.length) go(`slip:${done[0].id}`, 'forward');
   else if (done.length) go('payslips', screen === 'payslips' ? null : 'forward');
+  // Las que no tienen formato conocido (o no se pudieron leer) se revisan de una en una.
+  for (const [i, item] of review.entries()) {
+    await new Promise((resolve) => openSlipSheet(null, owner, item.file, item.prefill, resolve, review.length > 1 ? `${i + 1} de ${review.length}` : ''));
+  }
 }
 
 // Ventana para subir (elegir PDF) o editar a mano una nómina.
-function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = null) {
-  if (!owner) return;
+// prefill: datos del lector general para revisarlos; onClose: al guardar o cancelar (cola de revisión).
+function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = null, prefill = null, onClose = null, counter = '') {
+  if (!owner) return onClose?.();
   const now = new Date();
-  const s = existing ? { ...existing } : normSlip({ year: now.getFullYear(), month: now.getMonth() + 1 });
+  const s = existing ? { ...existing } : normSlip({ year: now.getFullYear(), month: now.getMonth() + 1, ...(prefill || {}),
+    ...(prefill && !prefill.year ? { year: now.getFullYear() } : {}), ...(prefill && !prefill.month ? { month: now.getMonth() + 1 } : {}) });
   let pickedFile = pendingFile;
+  let closed = false;
+  const finish = () => { if (closed) return; closed = true; onClose?.(); };
   const back = newSheet();
+  back.addEventListener('click', (e) => { if (e.target === back) finish(); });
   back.innerHTML = `
     <div class="sheet" role="dialog" aria-modal="true" aria-label="${existing ? 'Editar nómina' : 'Subir nóminas'}">
-      <h2 class="sheet-title">${existing ? 'Editar nómina' : pendingFile ? 'Nómina a mano' : 'Subir nóminas'}</h2>
+      <h2 class="sheet-title">${existing ? 'Editar nómina' : prefill ? 'Revisa la nómina' : pendingFile ? 'Nómina a mano' : 'Subir nóminas'}${counter ? ` <small class="muted">· ${counter}</small>` : ''}</h2>
       ${existing || pendingFile ? '' : `
       <label class="add-btn file-pick main-pick">${icon('upload', 18)} <span>Elegir PDF de nóminas o certificados</span>
         <input type="file" class="multi-pick" accept="application/pdf,image/*" multiple hidden>
       </label>
       <p class="muted small">Puedes elegir varios a la vez: se leen solos (mes, paga extra, empresa y todos los conceptos). El certificado de retenciones y la declaración de la Renta también se reconocen y van a su año. Si alguno no se puede leer, podrás meterlo a mano.</p>
       <p class="opt-label">O a mano</p>`}
-      ${pendingFile ? `<p class="muted small">No se ha podido leer «${esc(pendingFile.name)}». Rellena los importes y se guardará con el archivo.</p>` : ''}
+      ${pendingFile && prefill ? `<p class="muted small">«${esc(pendingFile.name)}» no tiene un formato conocido: se han leído sus totales con el lector general. Revisa el mes y los importes antes de guardar.</p>
+      ${prefill.check
+        ? `<p class="small ok-line">${icon('check', 14)} Bruto − descuentos = líquido impreso (${money(prefill.liquid)})</p>`
+        : `<p class="small warn-line">No se ha podido comprobar con el líquido impreso (${money(prefill.liquid)}): revísalo con el PDF.</p>`}
+      ${!prefill.year || !prefill.month ? '<p class="small warn-line">No se ha encontrado el mes de la nómina: elígelo.</p>' : ''}` : ''}
+      ${pendingFile && !prefill ? `<p class="muted small">No se ha podido leer «${esc(pendingFile.name)}»${/^image\//.test(pendingFile.type) ? ' (es una foto: la app no lee imágenes)' : ''}. Rellena los importes y se guardará con el archivo.</p>` : ''}
       ${existing ? `
       <label class="add-btn file-pick">${icon('upload', 18)} <span class="fp-name">${s.file ? esc(s.file.name) : 'Adjuntar PDF o foto'}</span>
         <input type="file" class="one-pick" accept="application/pdf,image/*" hidden>
@@ -1743,7 +1834,7 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
     pickedFile = e.target.files[0] || null;
     if (pickedFile) q('.fp-name').textContent = pickedFile.name;
   });
-  q('.f-cancel').addEventListener('click', closeSheet);
+  q('.f-cancel').addEventListener('click', () => { closeSheet(); finish(); });
   q('.f-save').addEventListener('click', async () => {
     const year = Number(q('.f-year').value);
     if (!(year >= 1990 && year <= 2100)) return void (q('.f-err').textContent = 'Revisa el año.');
@@ -1752,6 +1843,7 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
     s.company = q('.f-company').value.trim();
     if (!s.concepts.length) {
       s.gross = val('.f-gross'); s.irpf = val('.f-irpf'); s.ss = val('.f-ss'); s.other = val('.f-other');
+      if (!s.generic) s.liquid = null;
     }
     if (pickedFile) {
       const id = uid();
@@ -1774,6 +1866,7 @@ function openSlipSheet(existing = null, owner = currentProfile(), pendingFile = 
     showToast(existing ? 'Nómina actualizada' : `Nómina de ${slipTitle(s).toLowerCase()} guardada`);
     if (!existing) go(`slip:${s.id}`, 'forward');
     else render();
+    finish();
   });
 }
 
