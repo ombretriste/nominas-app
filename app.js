@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.4.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -57,9 +57,12 @@ const SCREENS = [
   { key: 'concepts',  label: 'Conceptos',  color: '#34d399' },
   { key: 'evolution', label: 'Evolución',  color: '#22d3ee' },
   { key: 'renta',     label: 'Renta',      color: '#bef264' },
+];
+// Pantallas que se abren desde el menú ⋯ (no salen en el Resumen ni en la barra inferior).
+const MENU_SCREENS = [
   { key: 'documents', label: 'Documentos', color: '#a3e635' },
 ];
-const screenByKey = Object.fromEntries(SCREENS.map((s) => [s.key, s]));
+const screenByKey = Object.fromEntries([...SCREENS, ...MENU_SCREENS].map((s) => [s.key, s]));
 // Colores del reparto del bruto (neto, IRPF, Seguridad Social, otras deducciones)
 const SPLIT_COLORS = { net: '#2dd4bf', irpf: '#f5a524', ss: '#4f8cff', other: '#a78bfa' };
 
@@ -788,6 +791,7 @@ function swapView(el, dir) {
 
 // ---------- Menú ⋯ ----------
 const MENU = [
+  { label: 'Documentos', icon: 'documents', run: () => go('documents', screen === 'documents' ? null : 'forward') },
   { label: 'Administrar perfiles', icon: 'users', run: () => openProfilesSheet() },
   { label: 'Opciones de visualización', icon: 'palette', run: () => openDisplaySheet() },
   { label: 'Sincronización en la nube', icon: 'cloud', run: () => openSyncSheet() },
@@ -1051,7 +1055,6 @@ function renderSummary() {
   const slips = slipsOfYear(selYear, profiles);
   const t = aggregate(slips);
   const months = new Set(slips.map((s) => s.month)).size;
-  const docs = allSlips(profiles).filter((s) => s.file).length + profiles.flatMap((p) => p.certs).filter((c) => c.file).length;
   const blockValue = {
     payslips: money(t.net),
     concepts: '',
@@ -1061,7 +1064,6 @@ function renderSummary() {
       return pairs.every((x) => x.ok) ? `<span class="pos small-status">${icon('check', 14)} cuadra</span>` : '<span class="neg small-status">no cuadra</span>';
     })(),
     evolution: '',
-    documents: `<span class="muted">${docs}</span>`,
   };
   const hasAny = allSlips(profiles).length > 0;
   const el = document.createElement('div');
