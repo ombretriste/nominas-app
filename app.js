@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -31,6 +31,8 @@ const ICONS = {
   evolution: '<path d="M4.5 20v-5M9.5 20v-8M14.5 20v-5.5M19.5 20V9"/><path d="M4.5 11l5-4.5 5 3 5-5"/>',
   documents: '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2h7a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   renta: '<path d="M6 3.5h12v17l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3-2 1.3z"/><path d="M9 8h6M9 11.5h6M9 15h3.5"/>',
+  sim: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8"/><circle cx="9" cy="11.5" r=".9" fill="currentColor"/><circle cx="12" cy="11.5" r=".9" fill="currentColor"/><circle cx="15" cy="11.5" r=".9" fill="currentColor"/><circle cx="9" cy="15" r=".9" fill="currentColor"/><circle cx="12" cy="15" r=".9" fill="currentColor"/><path d="M15 14v3"/><circle cx="9" cy="18" r=".9" fill="currentColor"/><circle cx="12" cy="18" r=".9" fill="currentColor"/>',
+  alert: '<path d="M12 3.5L2.5 20h19z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.2" r=".6" fill="currentColor"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   cloud: '<path d="M7 18a4.5 4.5 0 0 1-.5-9A6 6 0 0 1 18 9.5a4 4 0 0 1-.5 8.5z"/><path d="M12 11v5M9.5 13.5L12 11l2.5 2.5"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
@@ -57,6 +59,7 @@ const SCREENS = [
   { key: 'concepts',  label: 'Conceptos',  color: '#34d399' },
   { key: 'evolution', label: 'Evolución',  color: '#22d3ee' },
   { key: 'renta',     label: 'Renta',      color: '#bef264' },
+  { key: 'sim',       label: 'Simulador Renta', color: '#22d3ee' },
 ];
 // Pantallas que se abren desde el menú ⋯ (no salen en el Resumen ni en la barra inferior).
 const MENU_SCREENS = [
@@ -650,6 +653,8 @@ const DECL_FIELDS = [
   ['cuotaDif', /Cuota diferencial/],
   ['result', /Resultado de la declaración(?! complementaria)|Resultado \[\(/],
   ['perdidas', /Pendiente de aplicación en ejercicios futuros/],
+  ['minE', /Mínimo personal y familiar para calcular el gravamen estatal/],
+  ['minA', /Mínimo personal y familiar para calcular el gravamen autonómico/],
 ];
 // Casillas del modelo 2018–2023 (para declaraciones guardadas con la versión 0.5.0)
 const DECL_BOX_2023 = { '0003': 'gross', '0004': 'especie', '0005': 'iac', '0008': 'pp', '0012': 'ingresosTrabajo', '0013': 'ss',
@@ -700,6 +705,9 @@ async function readDeclPdf(file) {
   }
   if (v.gross == null || (v.cie == null && v.blg == null && v.result == null)) return null;
   if (v.result == null && v.cuotaDif != null) v.result = v.cuotaDif;
+  // Ejercicio de origen de las pérdidas pendientes («Ejercicio 2020. Pendiente de aplicación…»)
+  const py = t.match(/Ejercicio (\d{4})\.\s*Pendiente de aplicación en ejercicios futuros/);
+  if (py) v.perdidasYear = Number(py[1]);
   const year = Number((t.match(/Modelo\s*100\s+Ejercicio\s+(\d{4})/i) ?? t.match(/I\.R\.P\.F\.\s+EJERCICIO\s+(\d{4})/)
     ?? t.match(/\bEjercicio\s*(20\d{2})\b/i) ?? t.match(/ejercicio (20\d{2}) de la que se derive/i))?.[1]) || null;
   const p = t.match(/(\d{2})-(\d{2})-(\d{4})\s+a las\s+\d{1,2}[:.]\d{2}/);
@@ -814,6 +822,7 @@ function normData(d) {
       slips: (p.slips || []).map(normSlip),
       certs: (p.certs || []).map(normCert),
       decls: (p.decls || []).map(normDecl),
+      sim: p.sim && typeof p.sim === 'object' ? p.sim : {}, // ajustes del simulador de la Renta, por año
     })),
   };
 }
@@ -1189,6 +1198,7 @@ function render() {
     : screen === 'payslips' ? renderPayslips()
     : screen === 'concepts' ? renderConcepts()
     : screen === 'renta' ? renderRenta()
+    : screen === 'sim' ? renderSim()
     : screen === 'evolution' ? renderEvolution()
     : renderDocuments();
   const dir = navDir;
@@ -1491,6 +1501,11 @@ function renderSummary() {
   const blockValue = {
     payslips: money(t.net),
     concepts: '',
+    sim: (() => {
+      if (isTotal()) return '';
+      const r = calcRenta(simInputs(currentProfile(), selYear).x).result;
+      return `<span class="${r < 0 ? 'pos' : 'neg'} small-status">${money(Math.abs(r))}</span>`;
+    })(),
     renta: (() => {
       const pairs = profiles.flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certCheck(c, p.slips.filter((x) => x.year === selYear), p.slips)));
       if (!pairs.length) return '';
@@ -1657,14 +1672,14 @@ const CATALOG = {
   // Solo base de cotización / en especie
   '/34C': { name: 'Prorrata de pagas extra' },
   '234C': { name: 'Prorrata del reparto de beneficios' },
-  '5220': { name: 'Comedor', especie: true },
-  '2310': { name: 'Seguro de accidentes y RC', especie: true },
+  '5220': { name: 'Comedor', especie: true, exenta: true }, // exenta (vales de comida, con límite diario)
+  '2310': { name: 'Seguro de accidentes y RC', especie: true, exenta: true }, // no es rendimiento en especie (art. 42.2 LIRPF)
   '2772': { name: 'Seguro de vida', especie: true },
-  '3310': { name: 'Acciones', especie: true },
+  '3310': { name: 'Acciones', especie: true, exenta: true }, // exenta hasta 12.000 €/año
   '3352': { name: 'Aportación de la empresa al plan de pensiones', especie: true, renta: 'ppCo' },
   '3354': { name: 'Reparto lineal' },
   '3992': { name: 'Especie no repercutida', especie: true },
-  '777E': { name: 'Seguro médico de empresa', especie: true },
+  '777E': { name: 'Seguro médico de empresa', especie: true, exenta: true }, // exento hasta 500 €/año
   '778E': { name: 'Seguro médico (base de Seguridad Social)' },
   '775E': { name: 'Intereses del préstamo de empresa', especie: true },
   // Empresa
@@ -2252,6 +2267,355 @@ function renderRenta() {
   return el;
 }
 
+// ---------- Simulador de la Renta ----------
+// Estima la declaración de un ejercicio (por defecto el año en curso, que se presenta el siguiente)
+// con las nóminas, la previsión de los meses que faltan y los datos de UnderCTRL. Escalas estatal
+// y de la Comunidad de Madrid vigentes desde 2023 (comprobadas con la declaración de 2023 al céntimo);
+// tributación individual. Es una estimación: no incluye todas las deducciones ni situaciones.
+const TRAMOS = {
+  estatal: [[12450, 9.5], [20200, 12], [35200, 15], [60000, 18.5], [300000, 22.5], [Infinity, 24.5]],
+  madrid: [[13362.22, 8.5], [19004.63, 10.7], [35425.68, 12.8], [57320.4, 17.4], [Infinity, 20.5]],
+  ahorro: [[6000, 9.5], [50000, 10.5], [200000, 11.5], [300000, 13.5], [Infinity, 15]], // cada mitad (estatal y autonómica)
+};
+const MIN_PERSONAL = { estatal: 5550, madrid: 5956.65 };
+const OTROS_GASTOS_TRABAJO = 2000; // art. 19.2.f LIRPF
+function cuotaEscala(base, tramos) {
+  let c = 0, prev = 0;
+  for (const [hasta, pct] of tramos) {
+    if (base <= prev) break;
+    c += ((Math.min(base, hasta) - prev) * pct) / 100;
+    prev = hasta;
+  }
+  return round2(c);
+}
+// Reducción por obtención de rendimientos del trabajo (art. 20, desde 2024)
+function reduccionTrabajo(rn) {
+  if (rn <= 14852) return 7302;
+  if (rn <= 17673.52) return round2(7302 - 1.75 * (rn - 14852));
+  if (rn <= 19747.5) return round2(2364.34 - 1.14 * (rn - 17673.52));
+  return 0;
+}
+
+// x: datos del ejercicio → todas las cifras de la declaración simulada
+function calcRenta(x) {
+  const ingresos = round2(x.dinerarias + x.especie + x.ppCo);
+  const rnPrevio = round2(ingresos - x.ss - x.union);
+  const otrosGastos = Math.min(x.otrosGastos, Math.max(0, rnPrevio));
+  const rnSinRed = round2(rnPrevio - otrosGastos);
+  const redTrabajo = Math.min(reduccionTrabajo(rnSinRed), Math.max(0, rnSinRed));
+  const rnTrabajo = round2(rnSinRed - redTrabajo);
+  // Planes de pensiones: 1.500 € de aportaciones propias + hasta 8.500 € más por planes de empresa;
+  // nunca más del 30 % de los rendimientos netos del trabajo.
+  const ppTotal = round2(x.ppPersonal + x.ppTrab + x.ppCo);
+  const ppRed = round2(Math.min(ppTotal, Math.min(x.ppPersonal, 1500) + Math.min(x.ppTrab + x.ppCo, 8500), 0.3 * Math.max(0, rnTrabajo)));
+  const big = rnTrabajo;
+  const blg = round2(Math.max(0, big - ppRed));
+  // Ahorro: pérdidas del año compensan hasta el 25 % del capital mobiliario; las pendientes de años
+  // anteriores, primero contra ganancias y luego hasta el 25 % del capital mobiliario.
+  let rcm = x.rcm, gp = x.gp, pend = x.perdidasPend;
+  if (gp < 0) { const off = Math.min(-gp, 0.25 * Math.max(0, rcm)); rcm -= off; gp = 0; }
+  const aplicGp = Math.min(pend, Math.max(0, gp)); gp -= aplicGp; pend -= aplicGp;
+  const aplicRcm = Math.min(pend, 0.25 * Math.max(0, rcm)); rcm -= aplicRcm; pend -= aplicRcm;
+  const bla = round2(Math.max(0, rcm + gp));
+  const cGenE = Math.max(0, cuotaEscala(blg, TRAMOS.estatal) - cuotaEscala(Math.min(x.minE, blg), TRAMOS.estatal));
+  const cGenA = Math.max(0, cuotaEscala(blg, TRAMOS.madrid) - cuotaEscala(Math.min(x.minA, blg), TRAMOS.madrid));
+  const cAho = cuotaEscala(bla, TRAMOS.ahorro);
+  const cie = round2(cGenE + cAho), cia = round2(cGenA + cAho);
+  // Donativos (Ley 49/2002): 80 % de los primeros 250 € y 40 % del resto (45 % si son recurrentes)
+  const donDed = round2(Math.min((Math.min(x.donativos, 250) * 0.8) + Math.max(0, x.donativos - 250) * (x.donRecurrent ? 0.45 : 0.4), 0.1 * (blg + bla)));
+  const deducciones = round2(Math.min(cie + cia, donDed + x.otrasDed));
+  const cuotaLiq = round2(cie + cia - deducciones);
+  const result = round2(cuotaLiq - x.retenciones);
+  return { ingresos, rnPrevio, otrosGastos, redTrabajo, rnTrabajo, ppTotal, ppRed, big, blg, aplicPend: round2(aplicGp + aplicRcm), bla, cie, cia, deducciones, cuotaLiq, result,
+    tipoMedio: blg ? round2(((cGenE + cGenA) / blg) * 100) : 0 };
+}
+
+// Comprobación de las escalas con una declaración presentada (cuota íntegra estatal y autonómica)
+function calibrate(d) {
+  if (d.year < 2023 || d.v.blg == null || d.v.cie == null || d.v.cia == null) return null;
+  const minE = d.v.minE ?? MIN_PERSONAL.estatal, minA = d.v.minA ?? MIN_PERSONAL.madrid;
+  const bla = d.v.bla || 0;
+  const cie = round2(cuotaEscala(d.v.blg, TRAMOS.estatal) - cuotaEscala(Math.min(minE, d.v.blg), TRAMOS.estatal) + cuotaEscala(bla, TRAMOS.ahorro));
+  const cia = round2(cuotaEscala(d.v.blg, TRAMOS.madrid) - cuotaEscala(Math.min(minA, d.v.blg), TRAMOS.madrid) + cuotaEscala(bla, TRAMOS.ahorro));
+  return { year: d.year, diff: round2(cie + cia - d.v.cie - d.v.cia) };
+}
+
+const simSettings = (p, y) => ({ donativos: 0, donRecurrent: false, ppExtra: 0, gpExtra: 0, rcmExtra: 0, retExtra: 0, dedExtra: 0,
+  otrosGastos: OTROS_GASTOS_TRABAJO, exclude: {}, ...(p.sim?.[y] ?? {}) });
+const inYear = (date, y) => String(date || '').startsWith(`${y}-`);
+
+// Previsión de los meses que faltan del año en curso (y la paga extra pendiente).
+function forecastWork(p, y, fin) {
+  const now = new Date();
+  if (y !== now.getFullYear()) return { months: [], total: null };
+  const slips = p.slips.filter((s) => s.year === y);
+  const monthly = sortSlips(p.slips.filter((s) => s.kind === 'monthly')).slice(0, 3);
+  if (!monthly.length) return { months: [], total: null, missing: true };
+  const ts = monthly.map(slipTotals);
+  const sum = (k) => ts.reduce((a, t) => a + t[k], 0);
+  const avg = { gross: sum('gross') / ts.length, net: sum('net') / ts.length };
+  const rate = { irpf: sum('irpf') / sum('gross'), ss: sum('ss') / sum('gross'), grossPerNet: sum('gross') / sum('net') };
+  const ppOf = (s, code) => s.concepts.filter((k) => k.code.split(' ').at(-1) === code).reduce((a, k) => a + k.amount, 0);
+  const ppAvg = { trab: monthly.reduce((a, s) => a + ppOf(s, '2350'), 0) / monthly.length, co: monthly.reduce((a, s) => a + ppOf(s, '3352'), 0) / monthly.length };
+  const lastM = Math.max(0, ...slips.filter((s) => s.kind === 'monthly').map((s) => s.month));
+  const months = [];
+  for (let m = lastM + 1; m <= 12; m++) {
+    const ym = `${y}-${String(m).padStart(2, '0')}`;
+    const projNet = fin?.nomina?.[ym];
+    const big = projNet && projNet > avg.net * 1.5; // la proyección ya incluye una paga extra ese mes
+    const gross = projNet ? projNet * rate.grossPerNet : avg.gross;
+    months.push({ m, kind: 'monthly', src: projNet ? 'UnderCTRL' : 'media', net: projNet || avg.net, gross, includesExtra: big });
+    // Paga extra de ese mes el año pasado que este año aún no se ha cobrado
+    const prevExtra = p.slips.find((s) => s.year === y - 1 && s.month === m && s.kind === 'extra');
+    if (prevExtra && !big && !slips.some((s) => s.month === m && s.kind === 'extra')) {
+      const lastExtra = sortSlips(slips.filter((s) => s.kind === 'extra'))[0] ?? prevExtra;
+      months.push({ m, kind: 'extra', src: 'extra', gross: slipTotals(lastExtra).gross });
+    }
+  }
+  const tot = { gross: 0, irpf: 0, ss: 0, ppTrab: 0, ppCo: 0 };
+  months.forEach((x) => {
+    tot.gross += x.gross;
+    tot.irpf += x.gross * rate.irpf;
+    if (x.kind === 'monthly') { tot.ss += x.gross * rate.ss; tot.ppTrab += ppAvg.trab; tot.ppCo += ppAvg.co; }
+  });
+  Object.keys(tot).forEach((k) => { tot[k] = round2(tot[k]); });
+  return { months, total: tot, rate };
+}
+
+// Ahorro y planes de UnderCTRL del ejercicio
+function financeYear(fin, y, set) {
+  const out = { items: [], ppPersonal: 0, ppTrab: 0, ppCo: 0 };
+  if (!fin) return out;
+  const add = (it) => { it.excluded = !!set.exclude[it.id]; out.items.push(it); };
+  for (const pl of fin.pensions) {
+    const ins = pl.movements.filter((m) => m.type === 'in' && inYear(m.date, y));
+    if (pl.planType === 'personal') out.ppPersonal += ins.reduce((a, m) => a + m.amount, 0);
+    else { out.ppTrab += ins.reduce((a, m) => a + m.amount, 0); out.ppCo += ins.reduce((a, m) => a + m.company, 0); }
+  }
+  for (const s of fin.sold.filter((x) => inYear(x.sellDate, y))) {
+    const basis = s.fiscalPrice || s.buyPrice;
+    const eur = s.currency === 'EUR';
+    const ok = eur || (s.buyFx && s.sellFx);
+    const gain = ok ? round2(s.qty * s.sellPrice * (eur ? 1 : s.sellFx) - s.qty * basis * (eur ? 1 : s.buyFx)) : 0;
+    add({ id: `s-${s.id}`, kind: 'gp', label: `Venta de ${s.name}`, amount: gain,
+      note: !ok ? 'Sin cambio de divisa: no se puede calcular' : s.fiscalPrice ? 'Con el precio de compra fiscal' : basis ? 'Con el precio de compra' : 'Falta el precio de compra', bad: !ok || !basis });
+  }
+  const divs = fin.dividends.filter((d) => inYear(d.date, y));
+  if (divs.length) add({ id: 'divs', kind: 'rcm', label: `Dividendos (${divs.length})`, amount: round2(divs.reduce((a, d) => a + d.total, 0)), note: 'Importe íntegro' });
+  for (const f of [...fin.funds.map((x) => ({ ...x, t: 'Fondo' })), ...fin.crypto.map((x) => ({ ...x, t: 'Crypto' }))]) {
+    const outs = f.movements.filter((m) => m.type === 'out' && inYear(m.date, y));
+    if (!outs.length) continue;
+    const contributed = f.movements.filter((m) => m.type === 'in').reduce((a, m) => a + m.amount, 0);
+    const withdrawn = f.movements.filter((m) => m.type === 'out').reduce((a, m) => a + m.amount, 0);
+    const value = f.amount + withdrawn;
+    const ratio = value > 0 ? Math.max(0, value - contributed) / value : 0; // parte de cada reembolso que es ganancia (media)
+    const sold = outs.reduce((a, m) => a + m.amount, 0);
+    add({ id: `f-${f.id}`, kind: 'gp', label: `${f.t === 'Fondo' ? 'Reembolso' : 'Venta'} de ${f.name}`, amount: round2(sold * ratio),
+      note: `Estimado sobre ${numStr2(sold)} € retirados${f.t === 'Fondo' ? '; si fue un traspaso no tributa' : ''}` });
+  }
+  ['ppPersonal', 'ppTrab', 'ppCo'].forEach((k) => { out[k] = round2(out[k]); });
+  return out;
+}
+
+// Datos del ejercicio para calcRenta, con el origen de cada cifra
+function simInputs(p, y) {
+  const set = simSettings(p, y);
+  const fin = finPerson(p);
+  const slips = p.slips.filter((s) => s.year === y);
+  const r = rentaData(slips, p.slips, y);
+  const fc = forecastWork(p, y, fin);
+  const fy = financeYear(fin, y, set);
+  const incl = fy.items.filter((it) => !it.excluded);
+  const last = [...p.decls].sort((a, b) => b.year - a.year).find((d) => d.year < y) ?? null;
+  // Pérdidas pendientes de la última declaración: se compensan durante los 4 años siguientes al de origen.
+  // Sin el año de origen (declaraciones subidas antes de la v1.3.0) no se aplican.
+  const pendValid = last?.v.perdidas && last.v.perdidasYear && last.v.perdidasYear + 4 >= y ? last.v.perdidas : 0;
+  const f = fc.total ?? { gross: 0, irpf: 0, ss: 0, ppTrab: 0, ppCo: 0 };
+  // Especie que tributa (no el comedor, el seguro médico ni las acciones, exentos con límites) y
+  // su ingreso a cuenta, estimado con el % de IRPF del año
+  const espT = round2(yearConcepts(slips).filter((k) => isEspecie(k) && !catalogOf(k).exenta && catalogOf(k).renta !== 'ppCo').reduce((a, k) => a + k.amount, 0));
+  const irpfPct = r.gross ? r.irpf / r.gross : (fc.rate?.irpf ?? 0);
+  const iac = round2(espT * irpfPct);
+  return {
+    set, fin, slips, r, fc, fy, last,
+    x: {
+      dinerarias: round2(r.gross + r.caja + f.gross), especie: round2(espT + iac), ppCo: round2(r.ppCo + f.ppCo),
+      ss: round2(r.ss + f.ss), union: r.union, otrosGastos: Number(set.otrosGastos) || 0,
+      ppPersonal: round2(fy.ppPersonal + (Number(set.ppExtra) || 0)), ppTrab: round2(r.ppEmp + f.ppTrab),
+      rcm: round2(incl.filter((it) => it.kind === 'rcm').reduce((a, it) => a + it.amount, 0) + (Number(set.rcmExtra) || 0)),
+      gp: round2(incl.filter((it) => it.kind === 'gp').reduce((a, it) => a + it.amount, 0) + (Number(set.gpExtra) || 0)),
+      perdidasPend: pendValid,
+      minE: last?.v.minE ?? MIN_PERSONAL.estatal, minA: last?.v.minA ?? MIN_PERSONAL.madrid,
+      donativos: Number(set.donativos) || 0, donRecurrent: !!set.donRecurrent, otrasDed: Number(set.dedExtra) || 0,
+      retenciones: round2(r.irpf + r.cajaRet + iac + f.irpf + (Number(set.retExtra) || 0)),
+    },
+  };
+}
+
+// Aportaciones a planes de empresa: UnderCTRL frente a las nóminas (meses con nómina del año)
+function pensionMismatch(p, fin, y) {
+  if (!fin) return null;
+  const company = fin.pensions.filter((pl) => pl.planType === 'company');
+  if (!company.length) return null;
+  const slips = p.slips.filter((s) => s.year === y && s.concepts.length);
+  if (!slips.length) return null;
+  const months = new Set(slips.map((s) => String(s.month).padStart(2, '0')));
+  const code = (s, c) => s.concepts.filter((k) => k.code.split(' ').at(-1) === c).reduce((a, k) => a + k.amount, 0);
+  const nom = { trab: round2(slips.reduce((a, s) => a + code(s, '2350'), 0)), co: round2(slips.reduce((a, s) => a + code(s, '3352'), 0)) };
+  if (!nom.trab && !nom.co) return null;
+  const movs = company.flatMap((pl) => pl.movements).filter((m) => m.type === 'in' && inYear(m.date, y) && months.has(m.date.slice(5, 7)));
+  const uc = { trab: round2(movs.reduce((a, m) => a + m.amount, 0)), co: round2(movs.reduce((a, m) => a + m.company, 0)) };
+  const ok = Math.abs(uc.trab - nom.trab) < 1 && Math.abs(uc.co - nom.co) < 1;
+  return { ok, nom, uc, months: months.size };
+}
+
+function renderSim() {
+  const el = document.createElement('div');
+  if (isTotal()) {
+    el.innerHTML = '<section class="hero"><p class="label">Simulador de la Renta</p><p class="muted small">La Renta es de cada persona: elige una abajo.</p></section>';
+    return el;
+  }
+  const p = currentProfile();
+  const y = selYear;
+  const S = simInputs(p, y);
+  const c = calcRenta(S.x);
+  const refund = c.result < 0;
+  const decl = p.decls.find((d) => d.year === y) ?? null;
+  const cal = [...p.decls].sort((a, b) => b.year - a.year).map(calibrate).find(Boolean);
+  const mis = pensionMismatch(p, S.fin, y);
+  const row = (label, v, note = '', cls = '', attrs = '') => `
+    <div class="cat-row" ${attrs}><span class="cat-name">${label}${note ? `<small class="muted">${note}</small>` : ''}</span><span class="amount ${cls}">${money(v)}</span></div>`;
+  const nReal = S.slips.length;
+  const fcM = S.fc.months.filter((m) => m.kind === 'monthly');
+  const fcE = S.fc.months.filter((m) => m.kind === 'extra');
+  const fromUC = fcM.filter((m) => m.src === 'UnderCTRL').length;
+  const linkCard = !link
+    ? `<button class="add-btn sim-link" type="button">${icon('swap', 18)} Vincular con UnderCTRL</button>
+       <p class="muted small amort-note">Para sumar tus planes de pensiones, acciones vendidas, dividendos, fondos y la nómina prevista.</p>`
+    : `<button class="block sim-link" type="button" style="--block-color:#22d3ee">
+        <span class="cat-icon" style="color:#22d3ee">${icon('swap')}</span>
+        <span class="cat-text"><span class="cat-name">UnderCTRL</span><span class="muted small">${linkError ? esc(linkError)
+          : S.fin ? `«${esc(S.fin.name)}» · datos del ${new Date(linkData.at).toLocaleString(LOCALE, { dateStyle: 'short', timeStyle: 'short' })}`
+          : `No hay ninguna persona llamada «${esc(p.name)}» en UnderCTRL${Object.keys(linkData?.people ?? {}).length ? ` (hay: ${Object.values(linkData.people).map((x) => esc(x.name)).join(', ')})` : ''}`}</span></span>
+        <span class="chev">${icon('chevron', 16)}</span>
+      </button>`;
+  el.innerHTML = `
+    <section class="hero">
+      <p class="label">Renta ${y} · simulación</p>
+      <div class="net-row">
+        <p class="net amount ${refund ? 'pos' : 'neg'}">${money(Math.abs(c.result))}</p>
+        <button class="icon-btn sim-set" type="button" aria-label="Ajustes de la simulación" title="Ajustes">${icon('pencil', 20)}</button>
+      </div>
+      <p class="muted small">${refund ? 'A devolver' : 'A ingresar'} · se presenta en ${y + 1} · Madrid, tributación individual</p>
+      ${mis && !mis.ok ? `<p class="small warn-line">${icon('alert', 13)} Las aportaciones al plan de empresa de UnderCTRL no coinciden con tus nóminas (ver abajo).</p>` : ''}
+    </section>
+    <section class="summary">
+      <div class="pill"><span class="label">Cuota líquida</span><span class="amount">${money(c.cuotaLiq)}</span></div>
+      <div class="pill"><span class="label">Retenciones</span><span class="amount neg">${money(-S.x.retenciones)}</span></div>
+      <div class="pill"><span class="label">Base liquidable</span><span class="amount">${money(c.blg + c.bla)}</span></div>
+      <div class="pill"><span class="label">Tipo medio</span><span class="amount">${isPrivate() ? MASK : numPct(c.tipoMedio)}</span></div>
+    </section>
+    ${yearSelector()}
+    <section class="group">${linkCard}</section>
+    ${decl ? `<section class="group"><div class="list cert-card"><p class="small ${Math.abs(c.result - (decl.v.result ?? 0)) < 50 ? 'ok-line' : 'warn-line'}">Declaración presentada: ${decl.v.result < 0 ? 'a devolver' : 'a ingresar'} ${money(Math.abs(decl.v.result ?? 0))} · la simulación da ${money(Math.abs(c.result))} (diferencia ${money(round2(c.result - (decl.v.result ?? 0)), true)})</p></div></section>` : ''}
+    <section class="group"><h2>Rendimientos del trabajo</h2><div class="list ts-list">
+      ${row('Nóminas cobradas', round2(S.r.gross + S.r.caja), `${nReal} ${nReal === 1 ? 'nómina' : 'nóminas'} de ${y}${S.r.caja ? ', con pagos por caja' : ''}`)}
+      ${S.fc.total ? row('Previsión hasta diciembre', S.fc.total.gross,
+        `${fcM.length} ${fcM.length === 1 ? 'mes' : 'meses'}${fcE.length ? ` + ${fcE.length} paga extra` : ''} · ${fromUC ? `líquido de las proyecciones de UnderCTRL en ${fromUC}, ` : ''}bruto e IRPF según tus últimas nóminas`) : ''}
+      ${S.fc.missing ? '<p class="empty muted small">Sube alguna nómina para prever el resto del año.</p>' : ''}
+      ${row('Retribuciones en especie', S.x.especie, 'Las que tributan, con su ingreso a cuenta (comedor, seguro médico y acciones están exentos)')}
+      ${row('Aportación de la empresa al plan', S.x.ppCo)}
+      ${row('Seguridad Social', -S.x.ss, 'Gasto deducible', 'neg')}
+      ${S.x.union ? row('Cuotas sindicales', -S.x.union, 'Gasto deducible', 'neg') : ''}
+      ${row('Otros gastos deducibles', -c.otrosGastos, 'General de 2.000 €', 'neg')}
+      ${c.redTrabajo ? row('Reducción por rendimientos del trabajo', -c.redTrabajo, '', 'neg') : ''}
+      ${row('Rendimiento neto del trabajo', c.rnTrabajo)}
+    </div></section>
+    <section class="group"><h2>Planes de pensiones</h2><div class="list ts-list">
+      ${row('Tus aportaciones al plan de empresa', S.x.ppTrab, 'Nóminas')}
+      ${row('Aportaciones de la empresa', S.x.ppCo, 'Nóminas')}
+      ${row('Planes individuales', S.x.ppPersonal, S.fin ? `UnderCTRL${Number(S.set.ppExtra) ? ` + ${numStr2(S.set.ppExtra)} € previstos` : ''}` : 'Vincula UnderCTRL o añádelas en ajustes')}
+      ${row('Reducción aplicada', -c.ppRed, c.ppRed < c.ppTotal ? 'Limitada por ley' : '', 'neg')}
+      ${mis ? `<div class="cat-row"><span class="cat-name">${mis.ok ? `<span class="ok-line">${icon('check', 13)} UnderCTRL coincide con tus nóminas</span>` : `<span class="warn-line">${icon('alert', 13)} UnderCTRL no coincide con tus nóminas</span>`}<small class="muted">Plan de empresa en los ${mis.months} meses con nómina: tú ${numStr2(mis.uc.trab)} (nóminas ${numStr2(mis.nom.trab)}) · empresa ${numStr2(mis.uc.co)} (nóminas ${numStr2(mis.nom.co)})</small></span></div>` : ''}
+    </div></section>
+    <section class="group"><h2>Ahorro</h2><div class="list ts-list">
+      ${S.fy.items.map((it) => `
+      <div class="cat-row sim-item ${it.excluded ? 'off' : ''}" data-excl="${it.id}" role="button" tabindex="0">
+        <span class="cat-name">${esc(it.label)}<small class="muted">${it.kind === 'rcm' ? 'Capital mobiliario' : 'Ganancia patrimonial'} · ${esc(it.note)}${it.excluded ? ' · no se cuenta' : ''}</small></span>
+        <span class="amount ${it.bad ? 'warn' : ''}">${money(it.amount)}</span>
+      </div>`).join('') || `<p class="empty muted small">${S.fin ? `Sin ventas, dividendos ni reembolsos en ${y}.` : 'Vincula UnderCTRL para incluir acciones, dividendos y fondos.'}</p>`}
+      ${Number(S.set.gpExtra) ? row('Otras ganancias o pérdidas', S.set.gpExtra, 'Ajustes') : ''}
+      ${Number(S.set.rcmExtra) ? row('Otro capital mobiliario', S.set.rcmExtra, 'Ajustes') : ''}
+      ${c.aplicPend ? row('Pérdidas de años anteriores compensadas', -c.aplicPend, `De ${S.last.v.perdidasYear}, según tu declaración de ${S.last.year}${S.last.year < y - 1 ? `; si las usaste en ${S.last.year + 1}${S.last.year + 1 < y - 1 ? `–${y - 1}` : ''} será menos` : ''}`, 'neg') : ''}
+      ${S.last?.v.perdidas && !S.last.v.perdidasYear ? `<p class="empty muted small">Tu declaración de ${S.last.year} tiene ${money(S.last.v.perdidas)} de pérdidas pendientes, pero no se sabe de qué año son: vuelve a subirla para tenerlas en cuenta.</p>` : ''}
+      ${row('Base liquidable del ahorro', c.bla)}
+    </div>
+    ${S.fy.items.length ? '<p class="muted small amort-note">Toca una línea para no contarla (p. ej. un traspaso entre fondos).</p>' : ''}</section>
+    <section class="group"><h2>Cálculo</h2><div class="list ts-list">
+      ${row('Base liquidable general', c.blg)}
+      ${row('Cuota íntegra estatal', c.cie)}
+      ${row('Cuota íntegra autonómica', c.cia, 'Madrid')}
+      ${c.deducciones ? row('Deducciones', -c.deducciones, S.x.donativos ? 'Donativos y otras' : 'Ajustes', 'neg') : ''}
+      ${row('Cuota líquida', c.cuotaLiq)}
+      ${row('Retenciones y pagos a cuenta', -S.x.retenciones, `Nóminas${S.fc.total ? ' (cobradas y previstas)' : ''}${S.r.cajaRet ? ' y pagos por caja' : ''}${Number(S.set.retExtra) ? ' + ajustes' : ''}`, 'neg')}
+      ${row(refund ? 'Resultado: a devolver' : 'Resultado: a ingresar', Math.abs(c.result), '', refund ? 'pos' : 'neg')}
+    </div>
+    <p class="muted small amort-note">Mínimo personal ${S.last?.v.minE != null ? `de tu declaración de ${S.last.year}` : 'general'}. ${cal ? `Escalas comprobadas con tu declaración de ${cal.year}: ${Math.abs(cal.diff) < 1 ? 'cuota íntegra exacta' : `diferencia de ${money(cal.diff, true)}`}. ` : ''}Estimación orientativa: no incluye deducciones autonómicas, vivienda, familia ni otras rentas.</p></section>`;
+  bindYearSelector(el);
+  el.querySelector('.sim-link').addEventListener('click', openLinkSheet);
+  el.querySelector('.sim-set').addEventListener('click', () => openSimSettings(p, y));
+  el.querySelectorAll('[data-excl]').forEach((r) => r.addEventListener('click', () => {
+    change(() => {
+      p.sim ??= {};
+      const s = (p.sim[y] ??= {});
+      s.exclude ??= {};
+      if (s.exclude[r.dataset.excl]) delete s.exclude[r.dataset.excl]; else s.exclude[r.dataset.excl] = true;
+    });
+    render();
+  }));
+  return el;
+}
+
+function openSimSettings(p, y) {
+  const set = simSettings(p, y);
+  const back = newSheet();
+  const f = (cls, label, v, hint = '') => `<label class="field"><span>${label}</span><input class="${cls}" inputmode="decimal" value="${formatInput(Number(v) || 0)}" placeholder="0,00">${hint ? `<small class="muted">${hint}</small>` : ''}</label>`;
+  back.innerHTML = `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Ajustes de la simulación">
+      <h2 class="sheet-title">Ajustes · Renta ${y}</h2>
+      <p class="muted small">Lo que la app no puede saber por sí sola. Se guarda para este año y esta persona.</p>
+      ${f('s-ppx', 'Aportación a planes individuales prevista hasta fin de año', set.ppExtra, 'Además de las de UnderCTRL')}
+      <div class="mrow-fields">
+        ${f('s-don', 'Donativos del año', set.donativos)}
+        ${f('s-ded', 'Otras deducciones', set.dedExtra)}
+      </div>
+      <label class="no-more s-rec-l"><input type="checkbox" class="s-rec" ${set.donRecurrent ? 'checked' : ''}> Donativos recurrentes (3 años a la misma entidad)</label>
+      <div class="mrow-fields">
+        ${f('s-gp', 'Otras ganancias (− pérdidas)', set.gpExtra)}
+        ${f('s-rcm', 'Intereses y otro capital mobiliario', set.rcmExtra)}
+      </div>
+      <div class="mrow-fields">
+        ${f('s-ret', 'Otras retenciones', set.retExtra, 'Dividendos, fondos…')}
+        ${f('s-og', 'Otros gastos del trabajo', set.otrosGastos, '2.000 € en general')}
+      </div>
+      <div class="body-actions">
+        <button class="text-btn s-cancel" type="button">Cancelar</button>
+        <button class="text-btn done-btn s-save" type="button">Guardar</button>
+      </div>
+    </div>`;
+  const v = (cls) => parseAmount(back.querySelector(`.${cls}`).value);
+  back.querySelector('.s-cancel').addEventListener('click', closeSheet);
+  back.querySelector('.s-save').addEventListener('click', () => {
+    change(() => {
+      p.sim ??= {};
+      p.sim[y] = { ...(p.sim[y] ?? {}), ppExtra: v('s-ppx'), donativos: v('s-don'), dedExtra: v('s-ded'), donRecurrent: back.querySelector('.s-rec').checked,
+        gpExtra: v('s-gp'), rcmExtra: v('s-rcm'), retExtra: v('s-ret'), otrosGastos: v('s-og') };
+    });
+    closeSheet();
+    render();
+  });
+}
+
 // ---------- Evolución ----------
 // Bruto y neto de cada año (barras) y la tabla con su variación. El año en curso, si aún no está
 // completo, se compara con los mismos meses del anterior.
@@ -2610,6 +2974,7 @@ async function syncNow({ interactive = false } = {}) {
     syncError = '';
     saveSync();
     setTimeout(weeklyBackup, 0);
+    if (link) setTimeout(() => refreshLink(), 0); // datos de UnderCTRL al día
     return true;
   } catch (err) {
     console.warn(err);
@@ -2809,6 +3174,154 @@ function openSyncSheet() {
 
   if (sync) renderConnected();
   else renderForm();
+}
+
+// ---------- Vínculo con UnderCTRL ----------
+// PayCTRL lee los datos de UnderCTRL (planes de pensiones, acciones vendidas, dividendos, fondos,
+// crypto y la nómina prevista en sus proyecciones) para el simulador de la Renta. Hace falta la
+// nube activada en las dos apps con el mismo usuario; la contraseña de UnderCTRL se pide una vez
+// para derivar aquí sus claves (nunca se guarda). Las personas se emparejan por su nombre.
+const LINK_KEY = 'nominas:link';
+const LINK_DATA_KEY = 'nominas:linkData';
+let link = load(LINK_KEY, null);         // { username, user, auth, key }
+let linkData = load(LINK_DATA_KEY, null); // { at, people: { nombre normalizado: extracto } }
+let linkError = '';
+let linkBusy = false;
+const normName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+
+async function derivePeerAccount(username, password) {
+  const u = username.trim().toLowerCase();
+  const base = await crypto.subtle.importKey('raw', utf8.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = (salt) => crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: utf8.encode(salt), iterations: PBKDF2_ITERATIONS }, base, 256);
+  const [auth, key] = await Promise.all([bits(`finanzas-auth:${u}`), bits(`finanzas-enc:${u}`)]);
+  return { username: u, user: await sha256hex(`finanzas-user:${u}`), auth: hex(auth), key: toB64(key) };
+}
+async function decryptWith(keyB64, blob) {
+  const k = await crypto.subtle.importKey('raw', fromB64(keyB64), 'AES-GCM', false, ['decrypt']);
+  const [iv, ct] = blob.split('.');
+  return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(iv) }, k, fromB64(ct))));
+}
+const linkErrorText = (err) => ({
+  'peer-missing': 'No se encuentra tu cuenta de UnderCTRL en la nube. Comprueba que el usuario es el mismo y que las dos apps usan la misma base de datos en Vercel.',
+  'peer-auth': 'La contraseña de UnderCTRL no es correcta.',
+  'too-many': 'Demasiados intentos. Espera 15 minutos.',
+}[err.message] || syncErrorText(err));
+
+// Solo lo que necesita el simulador, por persona.
+function extractFinance(fin) {
+  const people = {};
+  for (const p of fin?.profiles ?? []) {
+    const c = p.cats ?? {};
+    const movs = (i) => (i.movements ?? []).map((m) => ({ type: m.type, date: m.date || '', amount: Number(m.amount) || 0, company: Number(m.company) || 0 }));
+    const nomina = {};
+    for (const proj of c.projections ?? []) {
+      for (const row of proj.income ?? []) {
+        if (!/n[oó]mina|sueldo|salario/i.test(row.name || '')) continue;
+        Object.entries(row.v ?? {}).forEach(([m, v]) => {
+          const mi = Number(m);
+          const ym = `${(Number(proj.startYear) || 0) + Math.floor(mi / 12)}-${String((mi % 12) + 1).padStart(2, '0')}`;
+          nomina[ym] = round2((nomina[ym] || 0) + (Number(v) || 0));
+        });
+      }
+    }
+    people[normName(p.name)] = {
+      name: p.name,
+      pensions: (c.pensions ?? []).map((i) => ({ id: i.id, name: i.name, planType: i.planType === 'company' ? 'company' : 'personal', movements: movs(i) })),
+      sold: (c.stocks ?? []).filter((i) => i.sellDate || i.sellPrice).map((i) => ({
+        id: i.id, name: i.name || i.fullName || i.ticker, qty: Number(i.qty) || 0, currency: i.currency || 'EUR',
+        buyDate: i.buyDate || '', buyPrice: Number(i.buyPrice) || 0, fiscalPrice: Number(i.fiscalPrice) || 0,
+        sellDate: i.sellDate || '', sellPrice: Number(i.sellPrice) || 0, buyFx: Number(i.buyFx) || 0, sellFx: Number(i.sellFx) || 0,
+      })),
+      dividends: (p.dividends ?? []).map((d) => ({ name: d.name || d.ticker, date: d.date || '', total: round2((Number(d.qty) || 0) * (Number(d.perShare) || 0)) })),
+      funds: (c.funds ?? []).map((i) => ({ id: i.id, name: i.name, amount: Number(i.amount) || 0, movements: movs(i) })),
+      crypto: (c.crypto ?? []).map((i) => ({ id: i.id, name: i.name || i.fullName, amount: Number(i.amount) || 0, movements: movs(i) })),
+      nomina,
+    };
+  }
+  return people;
+}
+
+async function refreshLink({ interactive = false } = {}) {
+  if (!sync || !link || linkBusy) return false;
+  linkBusy = true;
+  try {
+    const out = await syncCall('peer-pull', { peer: { user: link.user, auth: link.auth } });
+    linkData = { at: Date.now(), people: out.blob ? extractFinance(await decryptWith(link.key, out.blob)) : {} };
+    save(LINK_DATA_KEY, linkData);
+    linkError = '';
+    if (unlocked && screen === 'sim') render();
+    return true;
+  } catch (err) {
+    console.warn(err);
+    linkError = linkErrorText(err);
+    if (interactive) showToast(linkError, { warn: true });
+    return false;
+  } finally {
+    linkBusy = false;
+  }
+}
+const finPerson = (p) => linkData?.people?.[normName(p.name)] ?? null;
+
+function openLinkSheet() {
+  const back = newSheet();
+  if (!sync) {
+    back.innerHTML = `
+      <div class="sheet" role="dialog" aria-modal="true" aria-label="Vincular con UnderCTRL">
+        <h2 class="sheet-title">Vincular con UnderCTRL</h2>
+        <p class="muted small">Primero activa la <b>sincronización en la nube</b> (menú ⋯) con el mismo usuario que usas en UnderCTRL.</p>
+        <div class="body-actions"><span></span><button class="text-btn done-btn l-sync" type="button">Ir a la nube</button></div>
+      </div>`;
+    back.querySelector('.l-sync').addEventListener('click', openSyncSheet);
+    return;
+  }
+  const names = Object.values(linkData?.people ?? {}).map((x) => x.name);
+  back.innerHTML = `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Vincular con UnderCTRL">
+      <h2 class="sheet-title">Vincular con UnderCTRL</h2>
+      ${link ? `
+      <p>Vinculado como <b>${esc(link.username)}</b></p>
+      <p class="muted small">${linkError ? esc(linkError) : linkData?.at ? `Datos de UnderCTRL del ${new Date(linkData.at).toLocaleString(LOCALE, { dateStyle: 'short', timeStyle: 'short' })}` : 'Pendiente'}</p>
+      ${names.length ? `<p class="muted small">Personas en UnderCTRL: ${names.map(esc).join(', ')}. Se emparejan por el nombre con las de PayCTRL.</p>` : ''}
+      <div class="choice-list">
+        <button class="text-btn done-btn l-now" type="button">${icon('refresh', 16)} Actualizar ahora</button>
+        <button class="text-btn l-off" type="button">Desvincular</button>
+        <button class="text-btn l-close" type="button">Cerrar</button>
+      </div>` : `
+      <p class="muted small">El simulador de la Renta leerá de UnderCTRL tus planes de pensiones, acciones vendidas, dividendos, fondos y la nómina prevista en tus proyecciones. Usa la cuenta de la nube <b>${esc(sync.username)}</b>: introduce la contraseña de UnderCTRL de ese mismo usuario (no se guarda).</p>
+      <label class="field"><span>Contraseña de UnderCTRL</span><input class="l-pass" type="password" autocomplete="current-password" maxlength="128"></label>
+      <p class="error l-err" role="alert"></p>
+      <div class="body-actions">
+        <button class="text-btn l-cancel" type="button">Cancelar</button>
+        <button class="text-btn done-btn l-go" type="button">Vincular</button>
+      </div>`}
+    </div>`;
+  const q = (sel) => back.querySelector(sel);
+  q('.l-close')?.addEventListener('click', closeSheet);
+  q('.l-cancel')?.addEventListener('click', closeSheet);
+  q('.l-now')?.addEventListener('click', async () => { await refreshLink({ interactive: true }); openLinkSheet(); });
+  q('.l-off')?.addEventListener('click', () => {
+    link = null; linkData = null; linkError = '';
+    try { localStorage.removeItem(LINK_KEY); localStorage.removeItem(LINK_DATA_KEY); } catch {}
+    closeSheet(); render();
+    showToast('Desvinculado de UnderCTRL.');
+  });
+  q('.l-go')?.addEventListener('click', async () => {
+    const pass = q('.l-pass').value;
+    if (!pass) return void (q('.l-err').textContent = 'Introduce la contraseña.');
+    const btn = q('.l-go');
+    btn.disabled = true; btn.textContent = 'Un momento…';
+    link = await derivePeerAccount(sync.username, pass);
+    if (await refreshLink()) {
+      save(LINK_KEY, link);
+      closeSheet(); render();
+      showToast('Vinculado con UnderCTRL.');
+    } else {
+      q('.l-err').textContent = linkError;
+      link = load(LINK_KEY, null);
+      btn.disabled = false; btn.textContent = 'Vincular';
+    }
+  });
+  q('.l-pass')?.focus();
 }
 
 // ---------- Opciones de visualización ----------

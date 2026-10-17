@@ -8,6 +8,7 @@
 //        reason se guarda siempre, p. ej. la copia automática de antes de recuperar otra)
 //   POST /api/sync { action: 'backups', user, auth }           -> { backups: [{ id, at, size, reason }] }
 //   POST /api/sync { action: 'backup-get', user, auth, id }    -> { blob, at }
+//   POST /api/sync { action: 'peer-pull', user, auth, peer: { user, auth } } -> datos cifrados de UnderCTRL
 //   POST /api/sync { action: 'file-put', user, auth, id, blob } -> { ok }   (PDF de una nómina, cifrado)
 //   POST /api/sync { action: 'file-get', user, auth, id }       -> { blob }
 //   POST /api/sync { action: 'file-list', user, auth }          -> { ids }
@@ -147,6 +148,27 @@ module.exports = async (req, res) => {
       const [ok, rev] = await redis('EVAL', PUSH_SCRIPT, 1, key, baseRev, blob, Date.now());
       if (!ok) return res.status(409).json({ error: 'conflict', rev });
       return res.status(200).json({ rev });
+    }
+
+    // ----- Vínculo con UnderCTRL: leer sus datos (cifrados) desde esta app -----
+    // Requiere estar identificado en esta app y además las credenciales de la cuenta de UnderCTRL
+    // (derivadas en el dispositivo con el mismo usuario y su contraseña). Las dos apps deben usar la
+    // misma base de datos Upstash; sus claves no se mezclan («fin:» / «nom:»).
+    if (action === 'peer-pull') {
+      const peer = body.peer || {};
+      if (!HEX64.test(peer.user || '') || !HEX64.test(peer.auth || '')) return res.status(400).json({ error: 'bad-request' });
+      const pKey = `fin:acct:${peer.user}`;
+      const pFail = `fin:fail:${peer.user}`;
+      if ((Number(await redis('GET', pFail)) || 0) >= MAX_FAILS) return res.status(429).json({ error: 'too-many' });
+      const pv = await redis('HGET', pKey, 'verifier');
+      if (!pv) return res.status(404).json({ error: 'peer-missing' });
+      if (!sameHex(pv, await sha256hex(peer.auth))) {
+        await redis('INCR', pFail);
+        await redis('EXPIRE', pFail, FAIL_WINDOW_S);
+        return res.status(401).json({ error: 'peer-auth' });
+      }
+      const [rev, blob, at] = await redis('HMGET', pKey, 'rev', 'blob', 'at');
+      return res.status(200).json({ rev: Number(rev) || 0, blob: blob || null, at: Number(at) || null });
     }
 
     // ----- Copias de seguridad: lista Redis con lo más nuevo delante -----

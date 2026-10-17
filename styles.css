@@ -2023,3 +2023,9 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .decl-head .label { text-transform: uppercase; letter-spacing: .2em; font-size: 11px; color: var(--muted); }
 .decl-result { font-size: 32px; font-weight: 200; font-variant-numeric: tabular-nums; }
 .decl-check-head { padding: 12px 2px 6px; border-top: 1px solid var(--line); margin-top: 6px; }
+.amount.warn { color: #f5a524; }
+.sim-item { cursor: pointer; }
+.sim-item.off { opacity: .45; }
+.sim-item.off .amount { text-decoration: line-through; }
+.hero .warn-line, .hero .ok-line { margin-top: 6px; }
+.cat-name .ok-line, .cat-name .warn-line { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
