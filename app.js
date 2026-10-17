@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -186,12 +186,12 @@ const CLASS_LABELS = {
   A1: 'Personales', A2: 'De puesto de trabajo', A3: 'De cantidad o calidad de trabajo',
   A4: 'Pagas (vencimiento superior al mes)', A5: 'Abonos negativos (incidencias)', B1: 'Percepciones no salariales',
 };
-const ACRONYMS = ['IRPF', 'PP', 'ESOP', 'AT', 'S.S.', 'TR'];
+const ACRONYMS = ['IRPF', 'PP', 'ESOP', 'AT', 'S.S.', 'TR', 'MEI', 'IT', 'IMS'];
 function prettyName(s) {
   s = s.replace(/\s+/g, ' ').trim();
   if (/[a-zá-ú]/.test(s)) return s; // ya viene en minúsculas y mayúsculas
   const out = s.toLowerCase().replace(/^./, (c) => c.toUpperCase());
-  return out.split(' ').map((w) => ACRONYMS.find((a) => a.toLowerCase() === w) ?? w).join(' ')
+  return out.split(' ').map((w) => ACRONYMS.find((a) => a.toLowerCase() === w.toLowerCase()) ?? w).join(' ')
     .replace(/\bi\.\s?r\.\s?p\.\s?f\.?/gi, 'IRPF').replace(/^Retencion\b/, 'Retención');
 }
 const NUM_RE = /^\d{1,3}(?:\.\d{3})*,\d{2}-?$/;
@@ -363,10 +363,14 @@ async function readTablePayslipPdf(file) {
         byCol[best] = tNum(it.s);
       });
       if (byCol.dev == null && byCol.ded == null) continue;
-      const ded = byCol.ded != null;
-      const cat = !ded ? 'other' : /I\.?\s?R\.?\s?P\.?\s?F|RETENCI/i.test(name) ? 'irpf'
+      const cat = /I\.?\s?R\.?\s?P\.?\s?F|RETENCI/i.test(name) ? 'irpf'
         : /CONT\.?\s*COM|CONTINGENC|COTIZ|DESEMPLEO|FORMACI[ÓO]N|\bS\.?\s?S\.?\b|SEG\.?\s*SOC|\bM\.?E\.?I\b|EQUIDAD|HORAS EXTRA/i.test(name) ? 'ss' : 'other';
-      concepts.push(normConcept({ name: prettyName(name), type: ded ? 'ded' : 'dev', cat, amount: ded ? byCol.ded : byCol.dev, qty: byCol.qty ?? null }));
+      // Una línea puede ir en las dos columnas: p. ej. «Seguro colectivo», retribución en especie
+      // que se suma al devengado y se descuenta por el mismo importe.
+      const both = byCol.dev != null && byCol.ded != null;
+      const label = prettyName(name) + (both && Math.abs(byCol.dev - byCol.ded) < 0.005 ? ' (en especie)' : '');
+      if (byCol.dev != null) concepts.push(normConcept({ name: label, type: 'dev', cat: 'other', amount: byCol.dev, qty: byCol.qty ?? null }));
+      if (byCol.ded != null) concepts.push(normConcept({ name: label, type: 'ded', cat, amount: byCol.ded, qty: byCol.qty ?? null }));
     }
     // Totales: el importe a la derecha en la misma línea o justo debajo de la etiqueta
     const valueOf = (re) => {
@@ -383,19 +387,32 @@ async function readTablePayslipPdf(file) {
     gross ??= valueOf(/^Total Devengado|^Total Devengos|^Total Percepciones/i);
     dedTotal ??= valueOf(/^Total Deducciones|^Total a Deducir|^Total Descuentos/i);
     liquid ??= valueOf(/^L[íi]quido|^Total a percibir|^Neto a percibir/i);
-    // Cotizaciones del trabajador que solo figuran en su recuadro (columna «Cuota»)
-    const ap = items.find((it) => /APORTACI[ÓO]N DEL TRABAJADOR/i.test(it.s));
-    const dedSum = round2(concepts.filter((k) => k.type === 'ded').reduce((a, k) => a + k.amount, 0));
-    if (ap && dedTotal != null && dedSum < dedTotal - 0.01) {
+    // Recuadros de cotizaciones («Aportación del trabajador» y «de la empresa»), columna «Cuota»
+    const apW = items.find((it) => /APORTACI[ÓO]N DEL TRABAJADOR/i.test(it.s));
+    const apE = items.find((it) => /APORTACI[ÓO]N DE LA EMPRESA/i.test(it.s));
+    const leftEdge = Math.min(...[apW, apE].filter(Boolean).map((it) => it.x)) - 5;
+    const boxCuotas = (ap) => {
+      if (!ap) return [];
       const cuota = items.find((it) => /^Cuota$/i.test(it.s) && it.y < ap.y && it.x > ap.x - 20 && it.x < ap.x + ap.w + 10);
-      if (cuota) {
-        const labels = items.filter((it) => it.y < cuota.y - 3 && it.y > cuota.y - 120 && it.x < ap.x && !T_NUM.test(it.s));
-        for (const lab of labels) {
+      if (!cuota) return [];
+      return items.filter((it) => it.y < cuota.y - 3 && it.y > cuota.y - 140 && it.x < leftEdge && !T_NUM.test(it.s))
+        .map((lab) => {
           const v = items.find((it) => T_NUM.test(it.s) && Math.abs(it.y - lab.y) < 3 && Math.abs(center(it) - center(cuota)) < 30);
-          if (v && tNum(v.s)) concepts.push(normConcept({ name: prettyName(lab.s), type: 'ded', cat: 'ss', amount: tNum(v.s) }));
-        }
-      }
+          return v && tNum(v.s) ? { name: prettyName(lab.s), amount: tNum(v.s) } : null;
+        }).filter(Boolean);
+    };
+    const worker = boxCuotas(apW);
+    const workerSum = round2(worker.reduce((a, x) => a + x.amount, 0));
+    const dedSum = round2(concepts.filter((k) => k.type === 'ded').reduce((a, k) => a + k.amount, 0));
+    const ssLine = concepts.find((k) => k.type === 'ded' && k.cat === 'ss');
+    if (worker.length && ssLine && concepts.filter((k) => k.cat === 'ss').length === 1 && Math.abs(ssLine.amount - workerSum) < 0.02) {
+      // Una sola línea de Seguridad Social («Descuentos seg. soc.»): se sustituye por su desglose
+      concepts.splice(concepts.indexOf(ssLine), 1, ...worker.map((x) => normConcept({ name: x.name, type: 'ded', cat: 'ss', amount: x.amount })));
+    } else if (worker.length && dedTotal != null && Math.abs(dedSum + workerSum - dedTotal) < 0.02) {
+      // Cotizaciones que solo figuran en el recuadro: se añaden
+      worker.forEach((x) => concepts.push(normConcept({ name: x.name, type: 'ded', cat: 'ss', amount: x.amount })));
     }
+    boxCuotas(apE).forEach((x) => concepts.push(normConcept({ name: x.name, type: 'emp', amount: x.amount })));
   }
   if (!concepts.some((k) => k.type === 'dev') || liquid == null) return null;
   // Periodo: «Del 01 de ENERO de 2017 al 31 de DICIEMBRE de 2017» (o con fechas dd/mm/aaaa).
