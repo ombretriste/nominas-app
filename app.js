@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -2393,17 +2393,21 @@ function forecastWork(p, y, fin) {
     const prevExtra = p.slips.find((s) => s.year === y - 1 && s.month === m && s.kind === 'extra');
     if (prevExtra && !big && !slips.some((s) => s.month === m && s.kind === 'extra')) {
       const lastExtra = sortSlips(slips.filter((s) => s.kind === 'extra'))[0] ?? prevExtra;
-      months.push({ m, kind: 'extra', src: 'extra', gross: slipTotals(lastExtra).gross });
+      months.push({ m, kind: 'extra', src: 'extra', gross: slipTotals(lastExtra).gross, from: lastExtra, prevExtra });
     }
   }
   const tot = { gross: 0, irpf: 0, ss: 0, ppTrab: 0, ppCo: 0 };
   months.forEach((x) => {
+    x.irpf = x.gross * rate.irpf;
+    // La paga extra no cotiza aparte (va prorrateada): en un mes previsto con la extra incluida, la
+    // Seguridad Social se calcula solo sobre la parte de nómina normal (el bruto medio)
+    x.ss = x.kind === 'monthly' ? (x.includesExtra ? Math.min(x.gross, avg.gross) : x.gross) * rate.ss : 0;
     tot.gross += x.gross;
-    tot.irpf += x.gross * rate.irpf;
-    if (x.kind === 'monthly') { tot.ss += x.gross * rate.ss; tot.ppTrab += ppAvg.trab; tot.ppCo += ppAvg.co; }
+    tot.irpf += x.irpf;
+    if (x.kind === 'monthly') { tot.ss += x.ss; tot.ppTrab += ppAvg.trab; tot.ppCo += ppAvg.co; }
   });
   Object.keys(tot).forEach((k) => { tot[k] = round2(tot[k]); });
-  return { months, total: tot, rate };
+  return { months, total: tot, rate, ref: monthly, avg, ppAvg, lastM };
 }
 
 // Ahorro y planes de UnderCTRL del ejercicio
@@ -2551,8 +2555,9 @@ function renderSim() {
     ${decl ? `<section class="group"><div class="list cert-card"><p class="small ${Math.abs(c.result - (decl.v.result ?? 0)) < 50 ? 'ok-line' : 'warn-line'}">Declaración presentada: ${decl.v.result < 0 ? 'a devolver' : 'a ingresar'} ${money(Math.abs(decl.v.result ?? 0))} · la simulación da ${money(Math.abs(c.result))} (diferencia ${money(round2(c.result - (decl.v.result ?? 0)), true)})</p></div></section>` : ''}
     <section class="group"><h2>Rendimientos del trabajo</h2><div class="list ts-list">
       ${row('Nóminas cobradas', round2(S.r.gross + S.r.caja), `${nReal} ${nReal === 1 ? 'nómina' : 'nóminas'} de ${y}${S.r.caja ? ', con pagos por caja' : ''}`)}
-      ${S.fc.total ? row('Previsión hasta diciembre', S.fc.total.gross,
-        `${fcM.length} ${fcM.length === 1 ? 'mes' : 'meses'}${fcE.length ? ` + ${fcE.length} paga extra` : ''} · ${fromUC ? `líquido de las proyecciones de UnderCTRL en ${fromUC}, ` : ''}bruto e IRPF según tus últimas nóminas`) : ''}
+      ${S.fc.total ? row(`Previsión hasta diciembre <span class="info-dot" aria-hidden="true">i</span>`, S.fc.total.gross,
+        `${fcM.length} ${fcM.length === 1 ? 'mes' : 'meses'}${fcE.length ? ` + ${fcE.length} paga extra` : ''} · ${fromUC ? `líquido de las proyecciones de UnderCTRL en ${fromUC}, ` : ''}bruto e IRPF según tus últimas nóminas · toca para ver el cálculo`,
+        '', 'data-fc role="button" tabindex="0" aria-label="Ver cómo se calcula la previsión hasta diciembre"') : ''}
       ${S.fc.missing ? '<p class="empty muted small">Sube alguna nómina para prever el resto del año.</p>' : ''}
       ${row('Retribuciones en especie', S.x.especie, 'Las que tributan, con su ingreso a cuenta (comedor, seguro médico y acciones están exentos)')}
       ${row('Aportación de la empresa al plan', S.x.ppCo)}
@@ -2594,6 +2599,9 @@ function renderSim() {
     </div>
     <p class="muted small amort-note">Mínimo personal ${S.last?.v.minE != null ? `de tu declaración de ${S.last.year}` : 'general'}. ${cal ? `Escalas comprobadas con tu declaración de ${cal.year}: ${Math.abs(cal.diff) < 1 ? 'cuota íntegra exacta' : `diferencia de ${money(cal.diff, true)}`}. ` : ''}Estimación orientativa: no incluye deducciones autonómicas, vivienda, familia ni otras rentas.</p></section>`;
   el.querySelector('.sim-link').addEventListener('click', openLinkSheet);
+  const fcRow = el.querySelector('[data-fc]');
+  fcRow?.addEventListener('click', () => openForecastInfo(S, y));
+  fcRow?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openForecastInfo(S, y); });
   el.querySelector('.sim-set').addEventListener('click', () => openSimSettings(p, y));
   el.querySelectorAll('[data-excl]').forEach((r) => r.addEventListener('click', () => {
     change(() => {
@@ -2605,6 +2613,41 @@ function renderSim() {
     render();
   }));
   return el;
+}
+
+// Ventana que explica la previsión de los meses que faltan, mes a mes.
+function openForecastInfo(S, y) {
+  const fc = S.fc;
+  const pct = (v) => (isPrivate() ? MASK : numPct(v * 100));
+  const mon = (m) => MONTHS_SHORT[m - 1];
+  const back = newSheet();
+  back.innerHTML = `
+    <div class="sheet fc-sheet" role="dialog" aria-modal="true" aria-label="Cómo se calcula la previsión">
+      <h2 class="sheet-title">Previsión hasta diciembre</h2>
+      <p class="muted small">Los meses de ${y} que aún no tienen nómina${fc.lastM ? ` (de ${MONTHS[fc.lastM]} a diciembre)` : ''} se estiman así:</p>
+      <ol class="fc-steps">
+        <li><b>Nóminas de referencia.</b> Tus ${fc.ref.length} últimas nóminas mensuales:
+          <span class="fc-ref">${fc.ref.map((s) => { const t = slipTotals(s); return `${mon(s.month)} ${s.year}: ${money(t.gross)} bruto, ${money(t.net)} líquido`; }).join('<br>')}</span>
+          De media, ${money(fc.avg.gross)} brutos y ${money(fc.avg.net)} líquidos al mes.</li>
+        <li><b>Proporciones.</b> En esas nóminas, cada euro líquido son ${isPrivate() ? MASK : fc.rate.grossPerNet.toLocaleString(LOCALE, { maximumFractionDigits: 3 })} € brutos; la retención de IRPF es el ${pct(fc.rate.irpf)} del bruto y la Seguridad Social, el ${pct(fc.rate.ss)}.</li>
+        <li><b>Bruto de cada mes.</b> Si en UnderCTRL tienes ese mes en la fila «Nómina» de tus proyecciones, se toma ese líquido y se pasa a bruto con la proporción anterior. Si no, se usa el bruto medio de tus nóminas. A cada bruto se le aplica el % de IRPF y de Seguridad Social.</li>
+        ${fc.months.some((x) => x.kind === 'extra') ? `<li><b>Paga extra.</b> ${fc.months.filter((x) => x.kind === 'extra').map((x) => `En ${mon(x.m)} de ${y - 1} cobraste una paga extra que este año aún no tienes: se prevé por el bruto de ${x.from === x.prevExtra ? `aquella (${mon(x.prevExtra.month)} ${x.prevExtra.year})` : `tu última paga extra (${mon(x.from.month)} ${x.from.year})`}, con el mismo % de IRPF y sin Seguridad Social.`).join(' ')}</li>` : ''}
+        ${fc.months.some((x) => x.includesExtra) ? '<li><b>Meses con paga extra en UnderCTRL.</b> Si el líquido previsto de un mes supera en más de un 50 % al líquido medio, se entiende que ya incluye la paga extra y no se suma otra. La Seguridad Social de ese mes se calcula solo sobre la parte de nómina normal, porque la paga extra no cotiza aparte.</li>' : ''}
+        ${fc.ppAvg.trab || fc.ppAvg.co ? `<li><b>Plan de pensiones de empresa.</b> Cada mes previsto suma lo de tus nóminas de referencia: ${money(fc.ppAvg.trab)} tuyos y ${money(fc.ppAvg.co)} de la empresa.</li>` : ''}
+      </ol>
+      <div class="list fc-table">
+        <div class="amort-cols fc-cols"><span>Mes</span><span>Líquido</span><span>Bruto</span><span>IRPF</span><span>Seg. Soc.</span></div>
+        ${fc.months.map((x) => `
+        <div class="amort-row fc-cols">
+          <span>${mon(x.m)}<small class="fc-src ${x.src === 'UnderCTRL' ? 'uc' : ''}">${x.kind === 'extra' ? 'extra' : x.src === 'UnderCTRL' ? (x.includesExtra ? 'UC + extra' : 'UnderCTRL') : 'media'}</small></span>
+          <span>${x.net != null ? numStr2(x.net) : '—'}</span><span>${numStr2(x.gross)}</span><span>${numStr2(x.irpf)}</span><span>${x.ss ? numStr2(x.ss) : '—'}</span>
+        </div>`).join('')}
+        <div class="amort-row fc-cols fc-total"><span>Total</span><span></span><span>${numStr2(fc.total.gross)}</span><span>${numStr2(fc.total.irpf)}</span><span>${numStr2(fc.total.ss)}</span></div>
+      </div>
+      <p class="muted small">No se prevén pagos puntuales (bonus, complementos por resultado, atrasos…): si esperas alguno, la Renta real te saldrá distinta. ${S.fin ? 'Para que la previsión use tu líquido previsto, rellena la fila «Nómina» en las proyecciones de UnderCTRL.' : 'Vincula UnderCTRL para usar el líquido previsto de tus proyecciones.'}</p>
+      <div class="body-actions"><span></span><button class="text-btn done-btn fc-close" type="button">Entendido</button></div>
+    </div>`;
+  back.querySelector('.fc-close').addEventListener('click', closeSheet);
 }
 
 function openSimSettings(p, y) {

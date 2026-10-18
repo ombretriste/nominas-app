@@ -2046,3 +2046,16 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 /* Tarjeta «Simular la Renta» (en Renta): el texto ocupa las líneas que necesite */
 .block.sim-go .cat-name, #view .block.sim-go .cat-name { white-space: normal; overflow: visible; text-overflow: clip; }
 .block.sim-go .cat-text .muted { white-space: normal; display: block; line-height: 1.3; }
+/* Simulador: ventana que explica la previsión hasta diciembre */
+[data-fc] { cursor: pointer; }
+.info-dot { display: inline-grid; place-items: center; width: 16px; height: 16px; margin-left: 4px; border-radius: 50%; border: 1px solid currentColor;
+  font-size: 10px; font-style: normal; font-weight: 600; vertical-align: 2px; color: var(--accent); }
+.fc-steps { margin: 10px 0 14px; padding-left: 20px; font-size: 14px; line-height: 1.45; }
+.fc-steps li { margin-bottom: 8px; }
+.fc-ref { display: block; margin: 4px 0; color: var(--muted); font-size: 13px; }
+.fc-table { padding: 6px 10px; border-radius: 12px; margin-bottom: 10px; }
+.fc-cols { grid-template-columns: 1fr 1.1fr 1.1fr 1fr 1fr; align-items: center; }
+.fc-cols span:first-child { text-align: left; }
+.fc-src { display: block; font-size: 9px; color: var(--muted); }
+.fc-src.uc { color: var(--accent); }
+.fc-total { font-weight: 500; }
