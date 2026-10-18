@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.4.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -59,13 +59,16 @@ const SCREENS = [
   { key: 'concepts',  label: 'Conceptos',  color: '#34d399' },
   { key: 'evolution', label: 'Evolución',  color: '#22d3ee' },
   { key: 'renta',     label: 'Renta',      color: '#bef264' },
-  { key: 'sim',       label: 'Simulador Renta', color: '#22d3ee' },
 ];
 // Pantallas que se abren desde el menú ⋯ (no salen en el Resumen ni en la barra inferior).
 const MENU_SCREENS = [
   { key: 'documents', label: 'Documentos', color: '#a3e635' },
 ];
-const screenByKey = Object.fromEntries([...SCREENS, ...MENU_SCREENS].map((s) => [s.key, s]));
+// Subpantallas: se abren desde otra (parent), a la que vuelve la flecha.
+const SUB_SCREENS = [
+  { key: 'sim', label: 'Simulador Renta', color: '#22d3ee', parent: 'renta' },
+];
+const screenByKey = Object.fromEntries([...SCREENS, ...MENU_SCREENS, ...SUB_SCREENS].map((s) => [s.key, s]));
 // Colores del reparto del bruto (neto, IRPF, Seguridad Social, otras deducciones)
 const SPLIT_COLORS = { net: '#2dd4bf', irpf: '#f5a524', ss: '#4f8cff', other: '#a78bfa' };
 
@@ -1163,9 +1166,9 @@ function go(next, dir = null) {
   window.scrollTo(0, 0);
   render();
 }
-// Volver un nivel: nómina → Nóminas → Resumen.
+// Volver un nivel: nómina → Nóminas, simulador → Renta, el resto → Resumen.
 function back() {
-  go(screen.startsWith('slip:') ? 'payslips' : 'summary', 'back');
+  go(screen.startsWith('slip:') ? 'payslips' : screenByKey[screen]?.parent ?? 'summary', 'back');
 }
 function switchView(id) {
   if (!validView(id) || id === viewId) return;
@@ -1189,7 +1192,7 @@ function render() {
   const slip = screen.startsWith('slip:') ? findSlip(screen.slice(5)) : null;
   if (screen.startsWith('slip:') && !slip) screen = 'payslips';
   $('title').textContent = locked ? '' : screen === 'summary' ? 'Resumen' : slip ? 'Nómina' : screenByKey[screen].label;
-  const tabKey = slip ? 'payslips' : screen;
+  const tabKey = slip ? 'payslips' : screenByKey[screen]?.parent ?? screen;
   $('tabbar').querySelectorAll('.tab').forEach((b) => b.toggleAttribute('aria-current', b.dataset.tab === tabKey));
 
   const el = locked ? renderLock()
@@ -1501,11 +1504,6 @@ function renderSummary() {
   const blockValue = {
     payslips: money(t.net),
     concepts: '',
-    sim: (() => {
-      if (isTotal()) return '';
-      const r = calcRenta(simInputs(currentProfile(), selYear).x).result;
-      return `<span class="${r < 0 ? 'pos' : 'neg'} small-status">${money(Math.abs(r))}</span>`;
-    })(),
     renta: (() => {
       const pairs = profiles.flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certCheck(c, p.slips.filter((x) => x.year === selYear), p.slips)));
       if (!pairs.length) return '';
@@ -2190,6 +2188,26 @@ function certSection(p, cert) {
     </section>`;
 }
 
+// Simulador: solo en los años sin la declaración presentada (siempre el año en curso).
+function simCard() {
+  if (isTotal()) return '';
+  const p = currentProfile();
+  if (p.decls.some((d) => d.year === selYear && !d.draft)) return '';
+  const S = simInputs(p, selYear);
+  const r = calcRenta(S.x).result;
+  const what = [S.slips.length ? 'tus nóminas' : '', S.fc.total ? 'la previsión hasta diciembre' : '', S.fin ? 'UnderCTRL' : ''].filter(Boolean);
+  return `
+    <section class="group">
+      <button class="block sim-go" type="button" style="--block-color:#22d3ee">
+        <span class="cat-icon" style="color:#22d3ee">${icon('sim')}</span>
+        <span class="cat-text"><span class="cat-name">Simular la Renta ${selYear}</span><span class="muted small">${what.length ? `Con ${what.join(', ').replace(/, ([^,]*)$/, ' y $1')}` : 'Aún sin datos de este año'}</span></span>
+        <span class="amount ${r < 0 ? 'pos' : 'neg'}">${money(Math.abs(r))}</span>
+        <span class="chev">${icon('chevron', 16)}</span>
+      </button>
+      <p class="muted small amort-note">${r < 0 ? 'A devolver' : 'A ingresar'}, según la simulación. Cuando subas la declaración presentada se verá ella en su lugar.</p>
+    </section>`;
+}
+
 function renderRenta() {
   const slips = slipsOfYear(selYear, viewProfiles());
   const r = rentaData(slips, allSlips(viewProfiles()), selYear);
@@ -2207,6 +2225,7 @@ function renderRenta() {
       <div class="pill"><span class="label">Seguridad Social</span><span class="amount neg">${money(-r.ss)}</span></div>
     </section>
     ${yearSelector()}
+    ${simCard()}
     ${viewProfiles().flatMap((p) => p.decls.filter((d) => d.year === selYear).map((d) => declSection(p, d))).join('')}
     ${viewProfiles().flatMap((p) => p.certs.filter((c) => c.year === selYear).map((c) => certSection(p, c))).join('')}
     ${isTotal() || currentProfile().certs.some((c) => c.year === selYear) ? '' : `
@@ -2237,6 +2256,7 @@ function renderRenta() {
     </section>` : ''}
     <p class="muted small amort-note">Referencia calculada con tus nóminas. Lo que vale para la declaración es el certificado de retenciones de la empresa.</p>`;
   bindYearSelector(el);
+  el.querySelector('.sim-go')?.addEventListener('click', () => go('sim', 'forward'));
   el.querySelectorAll('.cert-add').forEach((btn) => btn.addEventListener('click', () => {
     const inp = document.createElement('input');
     inp.type = 'file';
@@ -2527,7 +2547,6 @@ function renderSim() {
       <div class="pill"><span class="label">Base liquidable</span><span class="amount">${money(c.blg + c.bla)}</span></div>
       <div class="pill"><span class="label">Tipo medio</span><span class="amount">${isPrivate() ? MASK : numPct(c.tipoMedio)}</span></div>
     </section>
-    ${yearSelector()}
     <section class="group">${linkCard}</section>
     ${decl ? `<section class="group"><div class="list cert-card"><p class="small ${Math.abs(c.result - (decl.v.result ?? 0)) < 50 ? 'ok-line' : 'warn-line'}">Declaración presentada: ${decl.v.result < 0 ? 'a devolver' : 'a ingresar'} ${money(Math.abs(decl.v.result ?? 0))} · la simulación da ${money(Math.abs(c.result))} (diferencia ${money(round2(c.result - (decl.v.result ?? 0)), true)})</p></div></section>` : ''}
     <section class="group"><h2>Rendimientos del trabajo</h2><div class="list ts-list">
@@ -2574,7 +2593,6 @@ function renderSim() {
       ${row(refund ? 'Resultado: a devolver' : 'Resultado: a ingresar', Math.abs(c.result), '', refund ? 'pos' : 'neg')}
     </div>
     <p class="muted small amort-note">Mínimo personal ${S.last?.v.minE != null ? `de tu declaración de ${S.last.year}` : 'general'}. ${cal ? `Escalas comprobadas con tu declaración de ${cal.year}: ${Math.abs(cal.diff) < 1 ? 'cuota íntegra exacta' : `diferencia de ${money(cal.diff, true)}`}. ` : ''}Estimación orientativa: no incluye deducciones autonómicas, vivienda, familia ni otras rentas.</p></section>`;
-  bindYearSelector(el);
   el.querySelector('.sim-link').addEventListener('click', openLinkSheet);
   el.querySelector('.sim-set').addEventListener('click', () => openSimSettings(p, y));
   el.querySelectorAll('[data-excl]').forEach((r) => r.addEventListener('click', () => {

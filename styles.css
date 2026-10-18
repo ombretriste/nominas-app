@@ -2035,3 +2035,14 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 @supports (padding-top: env(safe-area-inset-top)) {
   .topbar { padding-top: max(12px, calc(env(safe-area-inset-top) + 14px)); }
 }
+
+/* Resumen en móvil: los 4 bloques caben sin desplazar (también con la barra de perfiles) */
+@media (max-width: 699px) {
+  .sum-right .group { margin-top: 16px; }
+  .sum-right .blocks { gap: 6px; }
+  .sum-right .block { min-height: 54px; padding-top: 7px; padding-bottom: 7px; }
+  .sum-left .year-seg { margin: 10px 0 0; }
+}
+/* Tarjeta «Simular la Renta» (en Renta): el texto ocupa las líneas que necesite */
+.block.sim-go .cat-name, #view .block.sim-go .cat-name { white-space: normal; overflow: visible; text-overflow: clip; }
+.block.sim-go .cat-text .muted { white-space: normal; display: block; line-height: 1.3; }
