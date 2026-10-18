@@ -2029,3 +2029,9 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .sim-item.off .amount { text-decoration: line-through; }
 .hero .warn-line, .hero .ok-line { margin-top: 6px; }
 .cat-name .ok-line, .cat-name .warn-line { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+
+/* iPhone (pantalla completa): iOS difumina una franja justo debajo de la barra de estado (hora,
+   batería). Se baja la barra superior para que el título y los iconos queden fuera. */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .topbar { padding-top: max(12px, calc(env(safe-area-inset-top) + 14px)); }
+}
