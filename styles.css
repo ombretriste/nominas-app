@@ -2059,3 +2059,10 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .fc-src { display: block; font-size: 9px; color: var(--muted); }
 .fc-src.uc { color: var(--accent); }
 .fc-total { font-weight: 500; }
+
+/* Textos de cada fila con la misma letra que sus cifras (tamaño y grosor fino) */
+.cat-row .cat-name { font-size: 16px; font-weight: 300; }
+.cert-extra .cat-row .cat-name { font-size: 14px; }
+.block .cat-name, .block .cat-name .nm-long, .block .cat-name .nm-short { font-weight: 300; }
+#view .mv-year-head .mv-type { font-weight: 300; }
+.adm-name { font-weight: 300; }
