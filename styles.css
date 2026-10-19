@@ -2066,3 +2066,8 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .block .cat-name, .block .cat-name .nm-long, .block .cat-name .nm-short { font-weight: 300; }
 #view .mv-year-head .mv-type { font-weight: 300; }
 .adm-name { font-weight: 300; }
+/* Simulador: tipo medio con explicación */
+.pill-info { text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.pill-info .info-dot { width: 14px; height: 14px; font-size: 9px; letter-spacing: 0; vertical-align: 1px; }
+.tipo-cols { grid-template-columns: 2.2fr .8fr 1fr; align-items: center; }
+.tipo-cols span:first-child { text-align: left; }

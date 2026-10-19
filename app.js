@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -2351,7 +2351,7 @@ function calcRenta(x) {
   const cuotaLiq = round2(cie + cia - deducciones);
   const result = round2(cuotaLiq - x.retenciones);
   return { ingresos, rnPrevio, otrosGastos, redTrabajo, rnTrabajo, ppTotal, ppRed, big, blg, aplicPend: round2(aplicGp + aplicRcm), bla, cie, cia, donDed, dobleImp, deducciones, cuotaLiq, result,
-    tipoMedio: blg ? round2(((cGenE + cGenA) / blg) * 100) : 0 };
+    tipoMedio: blg ? round2(((cGenE + cGenA) / blg) * 100) : 0, cGenE: round2(cGenE), cGenA: round2(cGenA) };
 }
 
 // Comprobación de las escalas con una declaración presentada (cuota íntegra estatal y autonómica)
@@ -2549,7 +2549,7 @@ function renderSim() {
       <div class="pill"><span class="label">Cuota líquida</span><span class="amount">${money(c.cuotaLiq)}</span></div>
       <div class="pill"><span class="label">Retenciones</span><span class="amount neg">${money(-S.x.retenciones)}</span></div>
       <div class="pill"><span class="label">Base liquidable</span><span class="amount">${money(c.blg + c.bla)}</span></div>
-      <div class="pill"><span class="label">Tipo medio</span><span class="amount">${isPrivate() ? MASK : numPct(c.tipoMedio)}</span></div>
+      <button class="pill pill-info" type="button" data-tipo aria-label="Ver cómo se calcula el tipo medio"><span class="label">Tipo medio <span class="info-dot" aria-hidden="true">i</span></span><span class="amount">${isPrivate() ? MASK : numPct(c.tipoMedio)}</span></button>
     </section>
     <section class="group">${linkCard}</section>
     ${decl ? `<section class="group"><div class="list cert-card"><p class="small ${Math.abs(c.result - (decl.v.result ?? 0)) < 50 ? 'ok-line' : 'warn-line'}">Declaración presentada: ${decl.v.result < 0 ? 'a devolver' : 'a ingresar'} ${money(Math.abs(decl.v.result ?? 0))} · la simulación da ${money(Math.abs(c.result))} (diferencia ${money(round2(c.result - (decl.v.result ?? 0)), true)})</p></div></section>` : ''}
@@ -2599,6 +2599,7 @@ function renderSim() {
     </div>
     <p class="muted small amort-note">Mínimo personal ${S.last?.v.minE != null ? `de tu declaración de ${S.last.year}` : 'general'}. ${cal ? `Escalas comprobadas con tu declaración de ${cal.year}: ${Math.abs(cal.diff) < 1 ? 'cuota íntegra exacta' : `diferencia de ${money(cal.diff, true)}`}. ` : ''}Estimación orientativa: no incluye deducciones autonómicas, vivienda, familia ni otras rentas.</p></section>`;
   el.querySelector('.sim-link').addEventListener('click', openLinkSheet);
+  el.querySelector('[data-tipo]')?.addEventListener('click', () => openTipoInfo(S, c, y));
   const fcRow = el.querySelector('[data-fc]');
   fcRow?.addEventListener('click', () => openForecastInfo(S, y));
   fcRow?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openForecastInfo(S, y); });
@@ -2613,6 +2614,70 @@ function renderSim() {
     render();
   }));
   return el;
+}
+
+// Tramos de una escala aplicados a una base: [desde, hasta, %, cuota]
+function tramosDe(base, tramos) {
+  const out = [];
+  let prev = 0;
+  for (const [hasta, pct] of tramos) {
+    if (base <= prev) break;
+    const top = Math.min(base, hasta);
+    out.push([prev, top, pct, round2(((top - prev) * pct) / 100)]);
+    prev = hasta;
+  }
+  return out;
+}
+// Ventana que explica el tipo medio (como en la declaración) y por qué no coincide con el % de las nóminas.
+function openTipoInfo(S, c, y) {
+  const P = (v) => (isPrivate() ? MASK : numPct(v));
+  const e = (v) => (isPrivate() ? MASK : numStr2(v));
+  const blg = c.blg;
+  const minE = Math.min(S.x.minE, blg), minA = Math.min(S.x.minA, blg);
+  const marg = (tramos) => tramos.find(([hasta]) => blg <= hasta)?.[1] ?? 0;
+  const workGross = round2(S.r.gross + S.r.caja + (S.fc.total?.gross ?? 0));
+  const workIrpf = round2(S.r.irpf + S.r.cajaRet + (S.fc.total?.irpf ?? 0));
+  const efectivo = c.ingresos ? ((c.cGenE + c.cGenA) / c.ingresos) * 100 : 0;
+  const retNom = workGross ? (workIrpf / workGross) * 100 : 0;
+  const escala = (titulo, tramos, min, cuotaGen) => {
+    const rows = tramosDe(blg, tramos);
+    const cuotaBase = round2(rows.reduce((a, r) => a + r[3], 0));
+    const cuotaMin = cuotaEscala(min, tramos);
+    return `
+      <p class="opt-label">${titulo}</p>
+      <div class="list fc-table">
+        <div class="amort-cols tipo-cols"><span>Tramo de la base</span><span>%</span><span>Cuota</span></div>
+        ${rows.map(([a, b, pct, q]) => `<div class="amort-row tipo-cols"><span>${e(a)} – ${e(b)}</span><span>${numPct(pct)}</span><span>${e(q)}</span></div>`).join('')}
+        <div class="amort-row tipo-cols"><span>Cuota de la base</span><span></span><span>${e(cuotaBase)}</span></div>
+        <div class="amort-row tipo-cols"><span>− Mínimo personal (${e(min)} €)</span><span></span><span>−${e(cuotaMin)}</span></div>
+        <div class="amort-row tipo-cols fc-total"><span>Cuota</span><span>${blg ? P((cuotaGen / blg) * 100) : '—'}</span><span>${e(cuotaGen)}</span></div>
+      </div>`;
+  };
+  const back = newSheet();
+  back.innerHTML = `
+    <div class="sheet fc-sheet" role="dialog" aria-modal="true" aria-label="Cómo se calcula el tipo medio">
+      <h2 class="sheet-title">Tipo medio · ${P(c.tipoMedio)}</h2>
+      <p class="muted small">Es el tipo medio de gravamen de la declaración (las casillas «tipo medio estatal» y «tipo medio autonómico» sumadas): la cuota que corresponde a tu base general dividida entre la <b>base liquidable general</b>.</p>
+      <ol class="fc-steps">
+        <li><b>Base liquidable general: ${e(blg)} €.</b> Ingresos del trabajo ${e(c.ingresos)} € − Seguridad Social ${e(S.x.ss)} €${S.x.union ? ` − cuotas sindicales ${e(S.x.union)} €` : ''} − otros gastos ${e(c.otrosGastos)} €${c.redTrabajo ? ` − reducción del trabajo ${e(c.redTrabajo)} €` : ''}${c.ppRed ? ` − planes de pensiones ${e(c.ppRed)} €` : ''}.</li>
+        <li><b>Escalas.</b> A la base se le aplican por tramos la escala estatal y la de Madrid, y a cada una se le resta la cuota que corresponde al mínimo personal (esa parte no tributa).</li>
+        <li><b>Tipo medio</b> = (cuota estatal ${e(c.cGenE)} € + cuota autonómica ${e(c.cGenA)} €) ÷ base ${e(blg)} € = <b>${P(c.tipoMedio)}</b>.</li>
+      </ol>
+      ${escala('Escala estatal', TRAMOS.estatal, minE, c.cGenE)}
+      ${escala('Escala de Madrid', TRAMOS.madrid, minA, c.cGenA)}
+      <p class="opt-label">¿Por qué es mayor que el % de tus nóminas?</p>
+      <div class="list ts-list">
+        <div class="cat-row"><span class="cat-name">Tipo medio de la declaración<small class="muted">Sobre la base liquidable general</small></span><span class="amount">${P(c.tipoMedio)}</span></div>
+        <div class="cat-row"><span class="cat-name">Sobre tus ingresos del trabajo<small class="muted">La misma cuota sobre el bruto, antes de restar Seguridad Social, gastos y planes</small></span><span class="amount">${P(efectivo)}</span></div>
+        <div class="cat-row"><span class="cat-name">Retención media de tus nóminas de ${y}<small class="muted">IRPF retenido ÷ bruto${S.fc.total ? ', con la previsión' : ''}</small></span><span class="amount">${P(retNom)}</span></div>
+        <div class="cat-row"><span class="cat-name">Tipo marginal<small class="muted">Lo que tributa cada euro más de base (estatal ${numPct(marg(TRAMOS.estatal))} + Madrid ${numPct(marg(TRAMOS.madrid))})</small></span><span class="amount">${P(marg(TRAMOS.estatal) + marg(TRAMOS.madrid))}</span></div>
+      </div>
+      <p class="muted small">El % de IRPF de la nómina se aplica sobre el <b>bruto</b>; el tipo medio, sobre la <b>base liquidable</b>, que es menor porque ya descuenta la Seguridad Social, los gastos y los planes de pensiones. Por eso el tipo medio sale más alto aunque la cuota sea la misma. Para comparar con tus nóminas, mira la línea «sobre tus ingresos del trabajo».${isPrivate() || !retNom ? '' : efectivo > retNom + 0.1
+        ? ` En tu caso la cuota sobre el bruto (${P(efectivo)}) es mayor que lo que te retienen las nóminas (${P(retNom)}): por eso la parte del trabajo sale a ingresar, antes de deducciones y del resto de rentas.`
+        : efectivo < retNom - 0.1 ? ` En tu caso las nóminas retienen (${P(retNom)}) más que la cuota sobre el bruto (${P(efectivo)}): por eso la parte del trabajo sale a devolver.` : ''}</p>
+      <div class="body-actions"><span></span><button class="text-btn done-btn fc-close" type="button">Entendido</button></div>
+    </div>`;
+  back.querySelector('.fc-close').addEventListener('click', closeSheet);
 }
 
 // Ventana que explica la previsión de los meses que faltan, mes a mes.
