@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.3';
+const APP_VERSION = '1.4.4';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -3244,7 +3244,7 @@ function openSyncSheet() {
         <label class="field"><span>Usuario</span><input class="s-user" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="40"></label>
         <label class="field"><span>Contraseña</span><input class="s-pass" type="password" autocomplete="${mode === 'create' ? 'new-password' : 'current-password'}" maxlength="128"></label>
         ${mode === 'create' ? `<label class="field"><span>Repite la contraseña</span><input class="s-pass2" type="password" autocomplete="new-password" maxlength="128"></label>
-        <label class="field"><span>Clave de registro</span><input class="s-invite" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="La misma que en UnderCTRL"></label>` : ''}
+        <label class="field"><span>Clave de registro</span><input class="s-invite" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="Clave administrador"></label>` : ''}
         <p class="s-error error" role="alert"></p>
         <div class="body-actions">
           <button class="text-btn s-cancel" type="button">Cancelar</button>
