@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.4';
+const APP_VERSION = '1.4.5';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -1287,10 +1287,36 @@ function logoSVG(size = 132) {
     </svg>`;
 }
 
+// Sin nivel de seguridad, al abrir la app no hay botón: el logo se ve un instante y se pasa sola al
+// Resumen con la transición de cristal de las otras apps de OmT (ChatCTRL, TaskCTRL…). Con Face ID o
+// código, o tras «Bloquear», se entra con el botón como siempre.
+const SPLASH_HOLD_MS = 1700;
+const SPLASH_OUT_MS = 800;
+let autoEntry = true; // solo al abrir la app
+async function autoEnter() {
+  autoEntry = false;
+  if (screen !== 'lock' || effectiveLevel() !== 'none') return void render();
+  // La pantalla de inicio pasa a una capa fija y se disuelve en cristal sobre el Resumen
+  const veil = document.createElement('div');
+  veil.className = 'splash-veil';
+  const lock = $('view').querySelector('.lockscreen');
+  if (lock) veil.append(lock.cloneNode(true));
+  document.body.append(veil);
+  if (!(await unlock())) { veil.remove(); return void render(); }
+  go('summary');
+  document.body.classList.add('entering');
+  setTimeout(() => {
+    veil.remove();
+    document.body.classList.remove('entering');
+    setTimeout(maybeShowInstallHint, 350);
+  }, SPLASH_OUT_MS);
+}
+
 function renderLock() {
   const el = document.createElement('div');
-  el.className = 'lockscreen';
   const level = effectiveLevel();
+  const auto = autoEntry && level === 'none';
+  el.className = auto ? 'lockscreen auto' : 'lockscreen';
   const glyph = level === 'none' ? ENTER_GLYPH
     : level === 'pin' ? KEYPAD_GLYPH
     : isIPhone ? FACE_GLYPH : (isAndroid || isIPad || !isWindows) ? FINGER_GLYPH : LOCK_GLYPH;
@@ -1300,15 +1326,17 @@ function renderLock() {
       ${logoSVG()}
       <div class="brand-mark"><span class="bm-omt">Pay<b>CTRL</b></span><span class="bm-by">by OmT Finance</span></div>
     </div>
+    ${auto ? '' : `
     <div class="ls-bottom">
       <button class="ls-unlock" type="button" aria-label="${esc(label)}">
         <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${glyph}</svg>
       </button>
       <p class="ls-label">${esc(label)}</p>
     </div>
+    `}
     <p class="ls-version">Versión ${APP_VERSION}</p>`;
   const btn = el.querySelector('.ls-unlock');
-  btn.addEventListener('click', async () => {
+  btn?.addEventListener('click', async () => {
     btn.disabled = true;
     try {
       if (await unlock()) {
@@ -3608,6 +3636,8 @@ buildTabbar();
 updateUndoBtn();
 setPrivate(load(PRIVACY_KEY, false));
 go('lock');
+if (effectiveLevel() === 'none') setTimeout(autoEnter, SPLASH_HOLD_MS);
+else autoEntry = false;
 // Con la nube activada: sincroniza al abrir y luego cada 3 minutos (solo con la app a la vista).
 if (sync) syncNow();
 setInterval(() => { if (sync && !document.hidden) syncNow(); }, SYNC_EVERY_MS);

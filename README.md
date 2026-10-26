@@ -2,11 +2,11 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **1.4.4**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **1.4.5**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
-- **Pantalla de entrada** con logo, botón Face ID / código / «Entrar» según el nivel de seguridad y la versión.
+- **Pantalla de entrada** con logo, botón Face ID / código según el nivel de seguridad y la versión. Sin protección no hay botón al abrir: el logo se ve un instante y se pasa sola al Resumen con la transición de cristal de las otras apps de OmT (tras «Bloquear», botón «Entrar»).
 - **Resumen** del año elegido: neto percibido, bruto, retención IRPF, Seguridad Social, tipo IRPF medio, reparto del bruto y 4 bloques (Nóminas, Conceptos, Evolución y Renta).
 - **Nóminas**: lista por años plegables (mes, bruto, IRPF, neto). Cada nómina abre su detalle con devengos, deducciones y el documento adjunto.
 - **Subir nóminas**: se eligen uno o varios PDF y se leen solos (pdf.js): mes, paga extra, empresa, % de retención, líquido y cada línea del recibo (formato SAP de Airbus: CLAVE · CONCEPTO · ORIGEN · HORAS/% · DESCUENTOS · ABONOS · BASE). Se comprueba que el cálculo coincide con el líquido impreso. Si el PDF no tiene ese formato (nóminas de otras empresas), entra el **lector general** (`readGenericPayslipPdf`): se apoya en el modelo oficial de recibo de salarios (Orden ESS/2098/2014) y lee mes, tipo, empresa, bruto (total devengado), IRPF y su %, cotizaciones del trabajador, otros descuentos y líquido, comprobando que bruto − descuentos = líquido; no lee cada concepto y siempre se revisa antes de guardar (si se suben varias, de una en una). Las fotos no se leen (no hay OCR): se meten a mano con la imagen adjunta. Orden al subir: declaración → certificado → nómina de Airbus → **lector por columnas** → lector general → a mano. El lector por columnas (`readTablePayslipPdf`) es para recibos en tabla «Concepto · Unidades · Importe · Devengado · A deducir» (A3, Sage…; probado con 6 nóminas de Owasys, mensuales, paga extra y bonus): usa la posición de cada texto, lee cada concepto (también los que van en las dos columnas, como un seguro en especie), desglosa la Seguridad Social del trabajador con su recuadro «Aportación del trabajador», añade la «Aportación de la empresa» y los totales, y si cuadran con el líquido se guarda directamente; si el periodo abarca varios meses (bonus anual) se usa la fecha de pago y se marca como paga extra. Los archivos se guardan en IndexedDB del dispositivo.

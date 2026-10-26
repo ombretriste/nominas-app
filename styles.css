@@ -2071,3 +2071,29 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .pill-info .info-dot { width: 14px; height: 14px; font-size: 9px; letter-spacing: 0; vertical-align: 1px; }
 .tipo-cols { grid-template-columns: 2.2fr .8fr 1fr; align-items: center; }
 .tipo-cols span:first-child { text-align: left; }
+
+/* ---------- Entrada automática (sin nivel de seguridad), como en las otras apps de OmT ---------- */
+.lockscreen.auto { grid-template-rows: 1fr; }
+.lockscreen.auto .ls-top { justify-content: center; padding-bottom: 6vh; }
+.lockscreen.auto .logo-mark { animation: sp-logo-in .7s cubic-bezier(.2, .7, .2, 1) both; }
+.lockscreen.auto .brand-mark { animation: sp-word-in .65s .18s cubic-bezier(.2, .7, .2, 1) both; }
+.lockscreen.auto .ls-version { animation: fade-in .4s .2s ease both; }
+.splash-veil { position: fixed; inset: 0; z-index: 100; pointer-events: none; }
+body.entering .splash-veil { animation: splash-glass .8s ease forwards; }
+body.entering .splash-veil .lockscreen { animation: splash-content .4s ease forwards; }
+/* Solo se funden (sin transform: las barras fijas no saltan) */
+body.entering .app, body.entering .tabbar, body.entering .profilebar { animation: fade-in-app .75s ease both; }
+@keyframes sp-logo-in { from { opacity: 0; transform: scale(.86); filter: blur(6px); } }
+@keyframes sp-word-in { from { opacity: 0; transform: translateY(10px); filter: blur(4px); } }
+@keyframes fade-in-app { from { opacity: 0; } to { opacity: 1; } }
+@keyframes splash-glass {
+  0% { -webkit-backdrop-filter: blur(0); backdrop-filter: blur(0); background: transparent; }
+  35% { -webkit-backdrop-filter: blur(22px) saturate(130%); backdrop-filter: blur(22px) saturate(130%); background: color-mix(in srgb, var(--bg) 35%, transparent); opacity: 1; }
+  100% { -webkit-backdrop-filter: blur(0); backdrop-filter: blur(0); background: transparent; opacity: 0; }
+}
+@keyframes splash-content { to { opacity: 0; transform: scale(1.04); filter: blur(6px); } }
+@media (prefers-reduced-motion: reduce) {
+  .lockscreen.auto .logo-mark, .lockscreen.auto .brand-mark, .lockscreen.auto .ls-version,
+  body.entering .splash-veil, body.entering .splash-veil .lockscreen,
+  body.entering .app, body.entering .tabbar, body.entering .profilebar { animation-duration: .01s; animation-delay: 0s; }
+}
