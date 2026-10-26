@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.5';
+const APP_VERSION = '1.4.6';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -1291,7 +1291,7 @@ function logoSVG(size = 132) {
 // Resumen con la transición de cristal de las otras apps de OmT (ChatCTRL, TaskCTRL…). Con Face ID o
 // código, o tras «Bloquear», se entra con el botón como siempre.
 const SPLASH_HOLD_MS = 1700;
-const SPLASH_OUT_MS = 800;
+const SPLASH_OUT_MS = 1200;
 let autoEntry = true; // solo al abrir la app
 async function autoEnter() {
   autoEntry = false;
