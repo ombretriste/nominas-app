@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.7';
+const APP_VERSION = '1.4.8';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
