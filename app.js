@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.4.8';
+const APP_VERSION = '1.5.0';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -1277,20 +1277,21 @@ function logoSVG(size = 132) {
           <stop offset="0" stop-color="#22d3ee"/><stop offset=".55" stop-color="#34d399"/><stop offset="1" stop-color="#bef264"/>
         </linearGradient>
       </defs>
-      <circle cx="60" cy="60" r="52" stroke="url(#omt-g)" stroke-width="1.2"/>
-      <circle cx="60" cy="60" r="42" stroke="url(#omt-g)" stroke-width=".8" stroke-dasharray="2 5" opacity=".6"/>
-      <path d="M44 33 H68 L78 43 V87 H44 Z" stroke="url(#omt-g)" stroke-width="1.6"/>
-      <path d="M68 33 V43 H78" stroke="url(#omt-g)" stroke-width="1.6"/>
-      <path d="M51 54 H71 M51 62 H71 M51 70 H63" stroke="url(#omt-g)" stroke-width="1.6"/>
-      <circle cx="51" cy="79" r="2.2" fill="#22d3ee" stroke="none"/>
-      <circle cx="58" cy="79" r="2.2" fill="#34d399" stroke="none"/>
+      <circle class="lg-ring" pathLength="1" cx="60" cy="60" r="52" stroke="url(#omt-g)" stroke-width="1.2" transform="rotate(-90 60 60)"/>
+      <circle class="lg-dash" cx="60" cy="60" r="42" stroke="url(#omt-g)" stroke-width=".8" stroke-dasharray="2 5" opacity=".6"/>
+      <path class="lg-doc" pathLength="1" d="M44 33 H68 L78 43 V87 H44 Z" stroke="url(#omt-g)" stroke-width="1.6"/>
+      <path class="lg-fold" pathLength="1" d="M68 33 V43 H78" stroke="url(#omt-g)" stroke-width="1.6"/>
+      <path class="lg-rows" pathLength="1" d="M51 54 H71 M51 62 H71 M51 70 H63" stroke="url(#omt-g)" stroke-width="1.6"/>
+      <path class="lg-spark" pathLength="1" d="M44 33 H68 L78 43 V87 H44 Z" stroke="#fff" stroke-width="2.2"/>
+      <circle class="lg-dot lg-dot1" cx="51" cy="79" r="2.2" fill="#22d3ee" stroke="none"/>
+      <circle class="lg-dot lg-dot2" cx="58" cy="79" r="2.2" fill="#34d399" stroke="none"/>
     </svg>`;
 }
 
 // Sin nivel de seguridad, al abrir la app no hay botón: el logo se ve un instante y se pasa sola al
 // Resumen con la transición de cristal de las otras apps de OmT (ChatCTRL, TaskCTRL…). Con Face ID o
 // código, o tras «Bloquear», se entra con el botón como siempre.
-const SPLASH_HOLD_MS = 1700;
+const SPLASH_HOLD_MS = 2600; // da tiempo a ver el logo dibujándose (≈2 s) antes de pasar
 const SPLASH_OUT_MS = 1200;
 let autoEntry = true; // solo al abrir la app
 async function autoEnter() {

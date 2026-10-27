@@ -2,10 +2,11 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **1.4.8**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **1.5.0**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
+- **Logo animado en la entrada** (como UnderCTRL): el anillo y la nómina se dibujan, las líneas se escriben, aparecen los puntos y luego el anillo de puntos gira despacio y un destello recorre el contorno.
 - **Pantalla de entrada** con logo, botón Face ID / código según el nivel de seguridad y la versión. Sin protección no hay botón al abrir: el logo se ve un instante y se pasa sola al Resumen con la transición de cristal de las otras apps de OmT (tras «Bloquear», botón «Entrar»).
 - **Resumen** del año elegido: neto percibido, bruto, retención IRPF, Seguridad Social, tipo IRPF medio, reparto del bruto y 4 bloques (Nóminas, Conceptos, Evolución y Renta).
 - **Nóminas**: lista por años plegables (mes, bruto, IRPF, neto). Cada nómina abre su detalle con devengos, deducciones y el documento adjunto.

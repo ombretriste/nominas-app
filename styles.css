@@ -2095,3 +2095,37 @@ body.entering .app, body.entering .tabbar, body.entering .profilebar { animation
   body.entering .splash-veil, body.entering .splash-veil .lockscreen,
   body.entering .app, body.entering .tabbar, body.entering .profilebar { animation-duration: .01s; animation-delay: 0s; }
 }
+
+/* ---------- Logo animado en la entrada (como UnderCTRL): el anillo y la nómina se dibujan, las líneas
+   se escriben una tras otra, los puntos aparecen y luego queda vivo (anillo de puntos girando despacio
+   y un destello que recorre el contorno de la nómina) ---------- */
+.logo-mark .lg-spark { opacity: 0; }
+.lockscreen .logo-mark .lg-ring { stroke-dasharray: 1; stroke-dashoffset: 1; animation: lg-draw 1.6s .05s cubic-bezier(.4, 0, .2, 1) forwards; }
+.lockscreen .logo-mark .lg-doc { stroke-dasharray: 1; stroke-dashoffset: 1; animation: lg-draw 1.1s .4s cubic-bezier(.5, 0, .3, 1) forwards; }
+.lockscreen .logo-mark .lg-fold { stroke-dasharray: 1; stroke-dashoffset: 1; animation: lg-draw .45s 1.35s ease-out forwards; }
+.lockscreen .logo-mark .lg-rows { stroke-dasharray: 1; stroke-dashoffset: 1; animation: lg-draw .8s 1.1s linear forwards; }
+.lockscreen .logo-mark .lg-dot { transform-box: fill-box; transform-origin: center; transform: scale(0); animation: lg-pop .45s cubic-bezier(.3, 1.6, .5, 1) forwards; }
+.lockscreen .logo-mark .lg-dot1 { animation-delay: 1.7s; }
+.lockscreen .logo-mark .lg-dot2 { animation-delay: 1.85s; }
+.lockscreen .logo-mark .lg-dash { transform-box: fill-box; transform-origin: center; animation: fade-in .6s .2s ease both, lg-spin 40s linear infinite; }
+.lockscreen .logo-mark .lg-spark { stroke-dasharray: .07 1.2; stroke-dashoffset: .07; animation: lg-spark 3.2s 2.1s ease-in-out infinite; filter: drop-shadow(0 0 3px #fff); }
+@keyframes lg-draw { to { stroke-dashoffset: 0; } }
+@keyframes lg-pop { to { transform: scale(1); } }
+@keyframes lg-spin { to { transform: rotate(360deg); } }
+@keyframes lg-spark {
+  0% { stroke-dashoffset: .07; opacity: 0; }
+  8% { opacity: .9; }
+  45% { stroke-dashoffset: -1; opacity: .9; }
+  50%, 100% { stroke-dashoffset: -1; opacity: 0; }
+}
+/* En la capa que se disuelve al entrar, el logo ya dibujado (sin volver a empezar la animación) */
+.splash-veil .logo-mark .lg-ring, .splash-veil .logo-mark .lg-doc, .splash-veil .logo-mark .lg-fold,
+.splash-veil .logo-mark .lg-rows { animation: none; stroke-dashoffset: 0; }
+.splash-veil .logo-mark .lg-dot { animation: none; transform: none; }
+.splash-veil .logo-mark .lg-dash { animation: none; }
+.splash-veil .logo-mark .lg-spark { animation: none; opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .lockscreen .logo-mark .lg-ring, .lockscreen .logo-mark .lg-doc, .lockscreen .logo-mark .lg-fold,
+  .lockscreen .logo-mark .lg-rows, .lockscreen .logo-mark .lg-dot { animation-duration: .01s; animation-delay: 0s; }
+  .lockscreen .logo-mark .lg-dash, .lockscreen .logo-mark .lg-spark { animation: none; }
+}

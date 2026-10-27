@@ -1,5 +1,5 @@
 // Cache simple para que la app abra sin conexión.
-const CACHE = 'nominas-v25';
+const CACHE = 'nominas-v26';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.json', 'icons/icon.svg', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
