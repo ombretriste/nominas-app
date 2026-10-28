@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const CURRENCY = 'EUR';
 const LOCALE = 'es-ES';
 const STORAGE_KEY = 'nominas:data';
@@ -1291,7 +1291,11 @@ function logoSVG(size = 132) {
 // Sin nivel de seguridad, al abrir la app no hay botón: el logo se ve un instante y se pasa sola al
 // Resumen con la transición de cristal de las otras apps de OmT (ChatCTRL, TaskCTRL…). Con Face ID o
 // código, o tras «Bloquear», se entra con el botón como siempre.
-const SPLASH_HOLD_MS = 2600; // da tiempo a ver el logo dibujándose (≈2 s) antes de pasar
+// La transición empieza cuando la animación del logo ha terminado entera: se dibuja (≈2,3 s) y el
+// destello recorre la nómina una vez (empieza a los 2,1 s, dura 3,2 s y se apaga a la mitad: 3,7 s).
+// Si se cambian los tiempos de .lg-spark en styles.css, hay que cambiarlos aquí también.
+const SPARK_DELAY_MS = 2100, SPARK_CYCLE_MS = 3200;
+const SPLASH_HOLD_MS = SPARK_DELAY_MS + SPARK_CYCLE_MS * 0.5 + 150;
 const SPLASH_OUT_MS = 1200;
 let autoEntry = true; // solo al abrir la app
 async function autoEnter() {
@@ -3637,8 +3641,17 @@ buildTabbar();
 updateUndoBtn();
 setPrivate(load(PRIVACY_KEY, false));
 go('lock');
-if (effectiveLevel() === 'none') setTimeout(autoEnter, SPLASH_HOLD_MS);
-else autoEntry = false;
+// La espera cuenta desde que la animación del logo empieza de verdad (al pintarse la pantalla, que en
+// un arranque lento puede ser tarde), así la transición siempre llega con el destello ya apagado.
+// Si la animación no llega a arrancar (pestaña oculta…), se entra igualmente un poco después.
+if (effectiveLevel() === 'none') {
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ring = $('view').querySelector('.lockscreen .lg-ring');
+  let started = false;
+  const enter = () => { if (autoEntry) autoEnter(); };
+  ring?.addEventListener('animationstart', () => { started = true; setTimeout(enter, reduced ? 1200 : SPLASH_HOLD_MS - 50); }, { once: true });
+  setTimeout(() => { if (!started) enter(); }, reduced ? 1200 : SPLASH_HOLD_MS + 1500);
+} else autoEntry = false;
 // Con la nube activada: sincroniza al abrir y luego cada 3 minutos (solo con la app a la vista).
 if (sync) syncNow();
 setInterval(() => { if (sync && !document.hidden) syncNow(); }, SYNC_EVERY_MS);
