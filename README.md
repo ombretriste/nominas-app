@@ -2,7 +2,7 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **1.5.1**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **1.6.0**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
@@ -42,3 +42,8 @@ Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estéti
 2. **Nube**: en el proyecto → **Storage** → conecta la misma base **Upstash for Redis** que UnderCTRL (o una nueva). Las claves no se mezclan (`nom:` frente a `fin:`). Vuelve a desplegar.
 3. Para comprobarlo, abre `https://<tu-app>.vercel.app/api/sync` en el navegador: debe decir `"configured": true`. Si dice `false`, la lista `vars` muestra qué variables de base de datos ve el servidor (solo nombres). Sirve cualquier par `…REST_API_URL` / `…REST_API_TOKEN`, tenga el prefijo que tenga.
 4. Si en UnderCTRL cambiaste la clave de registro con la variable `SIGNUP_CODE`, ponla también aquí.
+
+## Analítica
+
+Vercel Web Analytics (se activa en la pestaña Analytics del proyecto de Vercel, sin cookies). La app es una sola página, así que cada función se cuenta como una página virtual con `track()` en `app.js`. Solo se envía el nombre de la función, nunca datos de la app, y `beforeSend` (en `index.html`) quita de la dirección lo que va tras `?` o `#`.
+
