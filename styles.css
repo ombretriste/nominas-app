@@ -114,6 +114,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
   box-sizing: content-box;
   height: 52px;
   padding-top: max(12px, env(safe-area-inset-top));
+  margin-inline: calc(50% - 50vw); /* logo y menú en las esquinas de la pantalla, aunque el contenido vaya centrado */
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
   transition: background-color .2s ease;
 }
 /* La barra se queda transparente: el contenido se difumina al pasar por debajo.
@@ -2129,3 +2132,5 @@ body.entering .app, body.entering .tabbar, body.entering .profilebar { animation
   .lockscreen .logo-mark .lg-rows, .lockscreen .logo-mark .lg-dot { animation-duration: .01s; animation-delay: 0s; }
   .lockscreen .logo-mark .lg-dash, .lockscreen .logo-mark .lg-spark { animation: none; }
 }
+
+body { overflow-x: clip; }
