@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.7.0';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -29,6 +29,7 @@ const MONTHS_SHORT = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 's
 const KINDS = { monthly: 'Mensual', extra: 'Paga extra', arrears: 'Atrasos' };
 
 const ICONS = {
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5"/><circle cx="12" cy="7.8" r=".9" fill="currentColor" stroke="none"/>',
   summary: '<path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/>',
   payslips: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M8.5 12.5h7M8.5 16h4.5"/>',
   concepts: '<path d="M4 6.5h16M4 12h16M4 17.5h10"/><circle cx="18.5" cy="17.5" r="2"/>',
@@ -1250,6 +1251,7 @@ const MENU = [
   { label: 'Importar/exportar copia', icon: 'swap', run: () => openBackupSheet() },
   { label: 'Nivel de seguridad', icon: 'shield', run: () => openSecuritySheet() },
   { label: 'Bloquear', icon: 'lock', run: () => lockApp() },
+  { label: 'Información', icon: 'info', run: () => openInfoSheet() },
 ];
 function openPopover(anchor, items) {
   const menu = $('menu');
@@ -3506,6 +3508,24 @@ function openLinkSheet() {
     }
   });
   q('.l-pass')?.focus();
+}
+
+function openInfoSheet() {
+  closeSheet();
+  const back = document.createElement('div');
+  back.className = 'sheet-backdrop center';
+  back.innerHTML = `
+    <div class="sheet info-sheet" role="dialog" aria-modal="true" aria-label="Información">
+      <span class="install-logo">${logoSVG(56)}</span>
+      <h2 class="sheet-title">PayCTRL</h2>
+      <p class="small muted">Versión ${APP_VERSION} · by OmT Finance</p>
+      <p class="small">Guarda tus nóminas con su PDF y entiende cada línea: bruto, retenciones, Seguridad Social y neto. También lee el certificado de retenciones y la declaración de la Renta.</p>
+      <p class="small muted">Tus nóminas se guardan en este dispositivo. Con la sincronización en la nube activada, se cifran en tu dispositivo antes de subirse.</p>
+      <div class="info-actions"><button type="button" class="done-btn" data-close>Cerrar</button></div>
+    </div>`;
+  document.body.append(back);
+  back.addEventListener('click', (e) => { if (e.target === back) closeSheet(); });
+  back.querySelector('[data-close]').addEventListener('click', closeSheet);
 }
 
 // ---------- Opciones de visualización ----------

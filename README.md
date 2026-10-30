@@ -2,7 +2,7 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **1.6.1**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **1.7.0**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
