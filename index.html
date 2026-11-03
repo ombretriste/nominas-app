@@ -14,15 +14,7 @@
   <link rel="manifest" href="manifest.json">
   <meta name="color-scheme" content="dark light">
   <link rel="stylesheet" href="styles.css">
-  <script>
-    // Aplica tema y fondo antes de pintar (evita un destello del tema equivocado).
-    try {
-      var d = JSON.parse(localStorage.getItem('nominas:display') || '{}');
-      var light = d.theme === 'light' || (d.theme !== 'dark' && matchMedia('(prefers-color-scheme: light)').matches);
-      document.documentElement.dataset.theme = light ? 'light' : 'dark';
-      document.documentElement.dataset.wall = d.wall || 'jade';
-    } catch (e) {}
-  </script>
+  <script src="boot.js"></script>
 </head>
 <body>
   <main id="app" class="app">
@@ -58,12 +50,6 @@
   <nav id="profilebar" class="profilebar" aria-label="Perfiles" hidden></nav>
   <nav id="tabbar" class="tabbar" hidden></nav>
 
-  <!-- Vercel Web Analytics: sin cookies; solo visitas y las funciones que se abren. Se quita de la
-       dirección todo lo que va tras ? o # (p. ej. enlaces de invitación) para que nunca se envíe. -->
-  <script>
-    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
-    window.va('beforeSend', function (e) { return Object.assign({}, e, { url: e.url.split(/[?#]/)[0] }); });
-  </script>
   <script defer src="/_vercel/insights/script.js"></script>
   <script src="app.js"></script>
 </body>

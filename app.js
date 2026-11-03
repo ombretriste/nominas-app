@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.7.1';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -147,9 +147,18 @@ const files = {
 
 // Una nómina: mes y año, tipo, empresa, importes y (opcional) el desglose por conceptos y el archivo.
 // Si tiene conceptos, el bruto y las deducciones salen de ellos; si no, de los importes escritos.
+// Identificadores y colores que acaban dentro de atributos HTML (data-…, style): se validan al cargar
+// para que unos datos manipulados (copia importada, nube) no puedan inyectar HTML.
+function safeId(v) { const s = String(v ?? ''); return /^[A-Za-z0-9_-]{1,64}$/.test(s) ? s : uid(); }
+function safeColor(v) { return /^#[0-9a-fA-F]{3,8}$/.test(String(v ?? '')) ? v : null; }
+function safeFile(f, fallbackName) {
+  if (!f || !/^[A-Za-z0-9_-]{1,64}$/.test(String(f.id ?? ''))) return null;
+  return { id: String(f.id), name: String(f.name || fallbackName), type: String(f.type || ''), size: Number(f.size) || 0 };
+}
+
 function normSlip(s) {
   return {
-    id: s.id || uid(),
+    id: safeId(s.id),
     year: Number(s.year) || new Date().getFullYear(),
     month: Math.min(12, Math.max(1, Number(s.month) || 1)),
     kind: KINDS[s.kind] ? s.kind : 'monthly',
@@ -162,7 +171,7 @@ function normSlip(s) {
     // Datos leídos del PDF: líquido impreso (para comprobar el cálculo) y % de retención.
     liquid: s.liquid == null ? null : Number(s.liquid),
     irpfPct: s.irpfPct == null ? null : Number(s.irpfPct),
-    file: s.file && s.file.id ? { id: s.file.id, name: s.file.name || 'nómina', type: s.file.type || '', size: Number(s.file.size) || 0 } : null,
+    file: safeFile(s.file, 'nómina'),
     demo: !!s.demo,
     generic: !!s.generic, // leída con el lector general (solo totales)
   };
@@ -175,7 +184,7 @@ function normConcept(k) {
   // (Sin usar constantes definidas más abajo: esto se ejecuta al cargar los datos.)
   if ((k.code || '').split(' ').at(-1) === '3682' && k.type === 'dev') k = { ...k, type: 'ded', cat: 'other', amount: -(Number(k.amount) || 0) };
   return {
-    id: k.id || uid(),
+    id: safeId(k.id),
     code: k.code || '',
     name: k.name || '',
     origin: k.origin || '',
@@ -228,7 +237,7 @@ async function loadPdfJs() {
 // Devuelve { year, month, kind, company, liquid, irpfPct, concepts } o null si no es un recibo reconocible.
 async function readPayslipPdf(file) {
   const lib = await loadPdfJs();
-  const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pdf = await lib.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise;
   const concepts = [];
   let text = '';
   for (let n = 1; n <= pdf.numPages; n++) {
@@ -326,7 +335,7 @@ const tNum = (s) => { const neg = s.startsWith('-') || s.endsWith('-'); const n 
 
 async function pdfItems(file) {
   const lib = await loadPdfJs();
-  const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pdf = await lib.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise;
   const pages = [];
   for (let n = 1; n <= pdf.numPages; n++) {
     const page = await pdf.getPage(n);
@@ -534,7 +543,7 @@ async function readGenericPayslipPdf(file) {
 function normCert(c) {
   const n = (v) => Number(v) || 0;
   return {
-    id: c.id || uid(),
+    id: safeId(c.id),
     year: Number(c.year) || new Date().getFullYear() - 1,
     company: c.company || '',
     gross: n(c.gross),          // retribuciones dinerarias: importe íntegro satisfecho
@@ -547,7 +556,7 @@ function normCert(c) {
     exentas: n(c.exentas),      // rentas exentas (mod. 190)
     dietas: n(c.dietas),        // dietas exceptuadas de gravamen
     arrears: Array.isArray(c.arrears) ? c.arrears.map((a) => ({ year: Number(a.year) || 0, gross: n(a.gross), ret: n(a.ret) })) : [],
-    file: c.file && c.file.id ? { id: c.file.id, name: c.file.name || 'certificado', type: c.file.type || '', size: Number(c.file.size) || 0 } : null,
+    file: safeFile(c.file, 'certificado'),
   };
 }
 
@@ -559,7 +568,7 @@ function pdfText(file) {
 }
 async function readPdfText(file) {
   const lib = await loadPdfJs();
-  const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pdf = await lib.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise;
   let text = '';
   for (let n = 1; n <= pdf.numPages; n++) {
     const page = await pdf.getPage(n);
@@ -677,12 +686,12 @@ function normDecl(d) {
   // Formato antiguo (v0.5.0): casillas del modelo 2023 → campos
   Object.entries(d.c || {}).forEach(([box, x]) => { const k = DECL_BOX_2023[box]; if (k && !(k in v)) { v[k] = Number(x); b[k] = box; } });
   return {
-    id: d.id || uid(),
+    id: safeId(d.id),
     year: Number(d.year) || new Date().getFullYear() - 1,
     presented: d.presented || '', // AAAA-MM-DD
     draft: !!d.draft,             // borrador (no presentada)
     v, b,
-    file: d.file && d.file.id ? { id: d.file.id, name: d.file.name || 'declaración', type: d.file.type || '', size: Number(d.file.size) || 0 } : null,
+    file: safeFile(d.file, 'declaración'),
   };
 }
 
@@ -824,9 +833,9 @@ function normData(d) {
   const profiles = Array.isArray(d?.profiles) && d.profiles.length ? d.profiles : [{ name: 'Yo' }];
   return {
     profiles: profiles.map((p, i) => ({
-      id: p.id || uid(),
+      id: safeId(p.id),
       name: p.name || `Persona ${i + 1}`,
-      color: p.color || PROFILE_COLORS[i % PROFILE_COLORS.length],
+      color: safeColor(p.color) || PROFILE_COLORS[i % PROFILE_COLORS.length],
       slips: (p.slips || []).map(normSlip),
       certs: (p.certs || []).map(normCert),
       decls: (p.decls || []).map(normDecl),
@@ -3407,9 +3416,9 @@ function extractFinance(fin) {
     }
     people[normName(p.name)] = {
       name: p.name,
-      pensions: (c.pensions ?? []).map((i) => ({ id: i.id, name: i.name, planType: i.planType === 'company' ? 'company' : 'personal', movements: movs(i) })),
+      pensions: (c.pensions ?? []).map((i) => ({ id: String(i.id ?? '').replace(/[^A-Za-z0-9_-]/g, ''), name: i.name, planType: i.planType === 'company' ? 'company' : 'personal', movements: movs(i) })),
       sold: (c.stocks ?? []).filter((i) => i.sellDate || i.sellPrice).map((i) => ({
-        id: i.id, name: i.name || i.fullName || i.ticker, qty: Number(i.qty) || 0, currency: i.currency || 'EUR',
+        id: String(i.id ?? '').replace(/[^A-Za-z0-9_-]/g, ''), name: i.name || i.fullName || i.ticker, qty: Number(i.qty) || 0, currency: i.currency || 'EUR',
         buyDate: i.buyDate || '', buyPrice: Number(i.buyPrice) || 0, fiscalPrice: Number(i.fiscalPrice) || 0,
         sellDate: i.sellDate || '', sellPrice: Number(i.sellPrice) || 0, buyFx: Number(i.buyFx) || 0, sellFx: Number(i.sellFx) || 0,
       })),
@@ -3419,8 +3428,8 @@ function extractFinance(fin) {
         return { name: d.name || d.ticker, date: d.date || '', total,
           origin: round2((total * (Number(d.whOrigin) || 0)) / 100), local: round2((total * (Number(d.whLocal) || 0)) / 100) };
       }),
-      funds: (c.funds ?? []).map((i) => ({ id: i.id, name: i.name, amount: Number(i.amount) || 0, movements: movs(i) })),
-      crypto: (c.crypto ?? []).map((i) => ({ id: i.id, name: i.name || i.fullName, amount: Number(i.amount) || 0, movements: movs(i) })),
+      funds: (c.funds ?? []).map((i) => ({ id: String(i.id ?? '').replace(/[^A-Za-z0-9_-]/g, ''), name: i.name, amount: Number(i.amount) || 0, movements: movs(i) })),
+      crypto: (c.crypto ?? []).map((i) => ({ id: String(i.id ?? '').replace(/[^A-Za-z0-9_-]/g, ''), name: i.name || i.fullName, amount: Number(i.amount) || 0, movements: movs(i) })),
       nomina,
     };
   }
