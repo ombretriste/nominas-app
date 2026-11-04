@@ -2146,3 +2146,13 @@ body { overflow-x: clip; }
 .doc-body .doc-page { display: block; width: 100%; height: auto; }
 .doc-body .doc-page + .doc-page { border-top: 6px solid #e5e7eb; }
 .doc-body .doc-loading { margin: 0; padding: 24px 16px; text-align: center; color: #64748b; }
+/* Visor: zoom (pellizco, doble toque, botones) */
+.doc-head { gap: 8px; }
+.doc-head .sheet-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-zoom-ctl { display: flex; align-items: center; gap: 4px; }
+.doc-zoom-ctl .icon-btn { width: 34px; height: 34px; font-size: 20px; line-height: 1; }
+.doc-zoom-ctl .z-val { min-width: 46px; text-align: center; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.doc-body { touch-action: pan-x pan-y; }
+.doc-zoom { width: 100%; }
+.doc-zoom img, .doc-zoom .doc-page { display: block; width: 100%; height: auto; }
+.doc-zoom .doc-page + .doc-page { border-top: 6px solid #e5e7eb; }

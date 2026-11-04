@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.7.2';
+const APP_VERSION = '1.8.0';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -2100,9 +2100,14 @@ async function openFile(ref, title) {
     <div class="sheet doc-sheet" role="dialog" aria-modal="true" aria-label="${esc(ref.name)}">
       <div class="doc-head">
         <h2 class="sheet-title">${esc(title)}</h2>
+        <div class="doc-zoom-ctl" role="group" aria-label="Zoom">
+          <button class="icon-btn z-out" type="button" aria-label="Reducir">−</button>
+          <span class="z-val">100 %</span>
+          <button class="icon-btn z-in" type="button" aria-label="Ampliar">+</button>
+        </div>
         <button class="icon-btn doc-close" type="button" aria-label="Cerrar">${icon('plus', 20).replace('M12 5v14M5 12h14', 'M6 6l12 12M18 6L6 18')}</button>
       </div>
-      <div class="doc-body">${isImg ? `<img src="${viewerUrl}" alt="${esc(ref.name)}">` : '<p class="muted small doc-loading">Cargando…</p>'}</div>
+      <div class="doc-body"><div class="doc-zoom">${isImg ? `<img src="${viewerUrl}" alt="${esc(ref.name)}">` : '<p class="muted small doc-loading">Cargando…</p>'}</div></div>
       <div class="body-actions">
         <a class="text-btn" href="${viewerUrl}" download="${esc(ref.name)}">Descargar</a>
         <a class="text-btn done-btn" href="${viewerUrl}" target="_blank" rel="noopener">Abrir</a>
@@ -2111,32 +2116,102 @@ async function openFile(ref, title) {
   v.addEventListener('click', (e) => { if (e.target === v) closeViewer(); });
   v.querySelector('.doc-close').addEventListener('click', closeViewer);
   document.body.append(v);
-  if (!isImg) renderPdfPages(blob, v.querySelector('.doc-body'));
+  const box = v.querySelector('.doc-body');
+  const inner = v.querySelector('.doc-zoom');
+  const pdfView = isImg ? null : renderPdfPages(blob, box, inner);
+  setupDocZoom(v, box, inner, (z) => pdfView?.then((pv) => pv?.render(z)));
+}
+// Zoom del visor: pellizco con dos dedos (centrado donde se pellizca), doble toque o doble clic
+// (100 % ↔ 250 %) y botones − / +. Al terminar, el PDF se vuelve a dibujar a más resolución.
+function setupDocZoom(v, box, inner, onSettle) {
+  const MIN = 1, MAX = 5;
+  let z = 1, settle = 0;
+  const label = v.querySelector('.z-val');
+  const apply = (nz, cx = box.clientWidth / 2, cy = box.clientHeight / 2) => {
+    nz = Math.min(MAX, Math.max(MIN, nz));
+    if (Math.abs(nz - z) < 0.001) return;
+    const ox = box.scrollLeft + cx, oy = box.scrollTop + cy; // punto del documento bajo el dedo
+    const k = nz / z;
+    z = nz;
+    inner.style.width = `${z * 100}%`;
+    box.scrollLeft = ox * k - cx;
+    box.scrollTop = oy * k - cy;
+    label.textContent = `${Math.round(z * 100)} %`;
+    clearTimeout(settle);
+    settle = setTimeout(() => onSettle(z), 250);
+  };
+  const local = (x, y) => { const r = box.getBoundingClientRect(); return [x - r.left, y - r.top]; };
+  v.querySelector('.z-in').addEventListener('click', () => apply(z + 0.5));
+  v.querySelector('.z-out').addEventListener('click', () => apply(z - 0.5));
+  box.addEventListener('dblclick', (e) => apply(z > 1 ? 1 : 2.5, ...local(e.clientX, e.clientY)));
+  let pinch = null, lastTap = 0, moved = false;
+  const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const mid = (t) => local((t[0].clientX + t[1].clientX) / 2, (t[0].clientY + t[1].clientY) / 2);
+  box.addEventListener('touchstart', (e) => {
+    moved = false;
+    if (e.touches.length === 2) pinch = { d: dist(e.touches), z };
+  }, { passive: true });
+  box.addEventListener('touchmove', (e) => {
+    moved = true;
+    if (e.touches.length !== 2 || !pinch) return;
+    e.preventDefault();
+    apply(pinch.z * dist(e.touches) / pinch.d, ...mid(e.touches));
+  }, { passive: false });
+  box.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) pinch = null;
+    if (e.touches.length || e.changedTouches.length !== 1 || moved) return;
+    const now = Date.now();
+    if (now - lastTap < 300) {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      apply(z > 1 ? 1 : 2.5, ...local(t.clientX, t.clientY));
+      lastTap = 0;
+    } else lastTap = now;
+  });
 }
 // El PDF se dibuja con pdf.js en lienzos, página a página: se ve igual en cualquier navegador
 // (Safari en iPhone no muestra bien los PDF dentro de la página, y la CSP bloquea su visor).
-async function renderPdfPages(blob, box) {
+async function renderPdfPages(blob, box, inner) {
   try {
     const lib = await loadPdfJs();
     const pdf = await lib.getDocument({ data: await blob.arrayBuffer(), isEvalSupported: false }).promise;
-    box.replaceChildren();
-    const width = box.clientWidth || 320;
+    inner.replaceChildren();
     const ratio = Math.min(window.devicePixelRatio || 1, 3);
+    const pages = [];
     for (let n = 1; n <= pdf.numPages; n++) {
-      if (!box.isConnected) return; // se ha cerrado el visor
       const page = await pdf.getPage(n);
-      const vp = page.getViewport({ scale: (width / page.getViewport({ scale: 1 }).width) * ratio });
       const canvas = document.createElement('canvas');
-      canvas.width = Math.floor(vp.width);
-      canvas.height = Math.floor(vp.height);
       canvas.className = 'doc-page';
       canvas.setAttribute('aria-label', `Página ${n} de ${pdf.numPages}`);
-      box.append(canvas);
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+      inner.append(canvas);
+      pages.push({ page, canvas });
     }
+    let gen = 0;
+    // Dibuja todas las páginas al ancho visible × zoom (con un tope de píxeles por memoria)
+    const render = async (z = 1) => {
+      const my = ++gen;
+      const width = (box.clientWidth || 320) * z;
+      for (const { page, canvas } of pages) {
+        if (my !== gen || !box.isConnected) return;
+        const base = page.getViewport({ scale: 1 });
+        const scale = Math.min((width / base.width) * ratio, 4096 / base.width);
+        const vp = page.getViewport({ scale });
+        const off = document.createElement('canvas'); // se dibuja aparte y se copia: sin parpadeo
+        off.width = Math.floor(vp.width);
+        off.height = Math.floor(vp.height);
+        await page.render({ canvasContext: off.getContext('2d'), viewport: vp }).promise;
+        if (my !== gen) return;
+        canvas.width = off.width;
+        canvas.height = off.height;
+        canvas.getContext('2d').drawImage(off, 0, 0);
+      }
+    };
+    await render(1);
+    return { render };
   } catch (e) {
     console.warn(e);
-    box.innerHTML = '<p class="muted small doc-loading">No se ha podido mostrar el PDF. Usa «Abrir» o «Descargar».</p>';
+    inner.innerHTML = '<p class="muted small doc-loading">No se ha podido mostrar el PDF. Usa «Abrir» o «Descargar».</p>';
+    return null;
   }
 }
 function closeViewer() {

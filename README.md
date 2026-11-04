@@ -2,7 +2,7 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **1.7.2**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **1.8.0**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
@@ -19,7 +19,7 @@ Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estéti
 - **Selector de año**: todos los años con datos, 4 a la vista; la barra se desliza para ver los anteriores.
 - **Simulador Renta** (dentro de Renta, en los años sin la declaración presentada; siempre en el año en curso): estima la declaración del año en curso (o de cualquier año) con las nóminas cobradas, la previsión de los meses que faltan (líquido de las proyecciones de UnderCTRL o la media de las últimas nóminas, con su bruto, IRPF y Seguridad Social; más la paga extra pendiente) y los datos de UnderCTRL: planes de pensiones individuales, acciones vendidas (con el precio de compra fiscal), dividendos (bruto; la retención en España suma a los pagos a cuenta y la de origen da la deducción por doble imposición, con el tope de lo que tributan aquí) y reembolsos de fondos o crypto (cada línea se puede descartar, p. ej. un traspaso). Aplica reducción por planes con sus límites, otros gastos, compensación de pérdidas pendientes (con el año de origen de la última declaración), mínimos personales de la última declaración, donativos y ajustes manuales; escalas estatal y de Madrid comprobadas con la declaración de 2023 al céntimo. Al tocar «Previsión hasta diciembre» o «Tipo medio» se abre una explicación del cálculo (el tipo medio, tramo a tramo y comparado con el % de las nóminas). Compara con la declaración presentada si la hay y avisa si el plan de empresa de UnderCTRL no coincide con las nóminas.
 - **Vínculo con UnderCTRL** (desde el simulador): con la nube activada en las dos apps con el mismo usuario y la misma base de datos Upstash; las personas se emparejan por el nombre. La contraseña de UnderCTRL se pide una vez para derivar sus claves (no se guarda). En sentido contrario, UnderCTRL lee de aquí las aportaciones al plan de empresa de las nóminas.
-- **Documentos** (menú ⋯): todos los PDF de nóminas y certificados, con visor.
+- **Documentos** (menú ⋯): todos los PDF de nóminas y certificados, con visor (las páginas se dibujan con pdf.js; zoom con dos dedos, doble toque o botones − / +, y se vuelven a dibujar nítidas al ampliar).
 - **Menú ⋯**: documentos, perfiles (una persona por perfil y «Total»), opciones de visualización (oscuro/claro/automático y 4 fondos), importar/exportar copia (con los documentos), nivel de seguridad y bloquear.
 - **Sincronización en la nube** (menú ⋯), como en UnderCTRL: crear cuenta con usuario, contraseña y la misma **clave de registro**; datos y PDF **cifrados de extremo a extremo** (PBKDF2 + AES-256-GCM) antes de subirse. Copia de seguridad semanal de los datos. La cuenta es independiente de la de UnderCTRL aunque uses el mismo usuario.
 - Deshacer, ocultar importes (ojo) y datos de ejemplo para ver el boceto.
