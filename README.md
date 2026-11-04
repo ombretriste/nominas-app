@@ -2,7 +2,7 @@
 
 *by OmT Finance* · nombre provisional
 
-Versión **1.7.1**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
+Versión **1.7.2**. Las correcciones y ajustes suben el último número; las novedades, el del medio.
 
 Web app (PWA) para guardar todas tus nóminas, con la misma estructura y estética que UnderCTRL pero en verde jade (turquesa–esmeralda–lima).
 
@@ -54,4 +54,4 @@ Vercel Web Analytics (se activa en la pestaña Analytics del proyecto de Vercel,
 - **En el dispositivo**: los datos y los PDF están en el almacenamiento del navegador sin cifrar; el bloqueo (Face ID, código o ninguno) es una barrera de interfaz, como en UnderCTRL.
 - **En la nube**: cifrado de extremo a extremo (PBKDF2 310.000 iteraciones + AES-256-GCM); el servidor solo guarda bloques ilegibles y el SHA-256 de la clave de acceso, con límite de intentos. El vínculo con UnderCTRL exige las credenciales de las dos cuentas.
 - **CSP** (`vercel.json`): solo se ejecutan scripts propios y no hay conexiones a otros dominios, así que un texto malicioso dentro de un PDF no puede ejecutar código ni enviar datos fuera.
-- **PDF**: se leen solo como texto, con pdf.js sin `eval` (mitigación de CVE-2024-4367); los textos leídos se escapan siempre al mostrarse, y los identificadores y colores de los datos (copia importada, nube) se validan al cargar.
+- **PDF**: se leen y se muestran (el visor los dibuja con pdf.js en lienzos, página a página, porque Safari no muestra bien los PDF dentro de la página) con pdf.js sin `eval` (mitigación de CVE-2024-4367); los textos leídos se escapan siempre al mostrarse, y los identificadores y colores de los datos (copia importada, nube) se validan al cargar.

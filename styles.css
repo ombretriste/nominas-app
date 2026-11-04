@@ -1976,7 +1976,7 @@ body.kb-open .sheet { padding-bottom: 16px; border-radius: 22px; }
 .ts-list .empty { padding: 16px; text-align: left; }
 .doc-sheet { max-width: 760px; width: 100%; display: flex; flex-direction: column; }
 .doc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.doc-body { flex: 1; min-height: 50vh; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fff; }
+.doc-body { flex: 1; min-height: 50vh; max-height: 66vh; border: 1px solid var(--line); border-radius: 12px; overflow: auto; -webkit-overflow-scrolling: touch; background: #fff; }
 .doc-body iframe { width: 100%; height: 62vh; border: 0; display: block; }
 .doc-body img { width: 100%; height: auto; display: block; }
 .doc-sheet a.text-btn { text-decoration: none; display: inline-flex; align-items: center; color: var(--text); }
@@ -2141,3 +2141,8 @@ body { overflow-x: clip; }
 .info-sheet .sheet-title { margin: 0; }
 .info-actions { display: flex; justify-content: center; width: 100%; margin-top: 6px; }
 .info-actions .done-btn { width: auto; height: auto; padding: 10px 28px; border-radius: 999px; font-size: 15px; font-weight: 600; }
+
+/* Visor de PDF dibujado con pdf.js: una página debajo de otra */
+.doc-body .doc-page { display: block; width: 100%; height: auto; }
+.doc-body .doc-page + .doc-page { border-top: 6px solid #e5e7eb; }
+.doc-body .doc-loading { margin: 0; padding: 24px 16px; text-align: center; color: #64748b; }

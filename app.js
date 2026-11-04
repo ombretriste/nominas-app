@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.7.2';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -2102,7 +2102,7 @@ async function openFile(ref, title) {
         <h2 class="sheet-title">${esc(title)}</h2>
         <button class="icon-btn doc-close" type="button" aria-label="Cerrar">${icon('plus', 20).replace('M12 5v14M5 12h14', 'M6 6l12 12M18 6L6 18')}</button>
       </div>
-      <div class="doc-body">${isImg ? `<img src="${viewerUrl}" alt="${esc(ref.name)}">` : `<iframe src="${viewerUrl}" title="${esc(ref.name)}"></iframe>`}</div>
+      <div class="doc-body">${isImg ? `<img src="${viewerUrl}" alt="${esc(ref.name)}">` : '<p class="muted small doc-loading">Cargando…</p>'}</div>
       <div class="body-actions">
         <a class="text-btn" href="${viewerUrl}" download="${esc(ref.name)}">Descargar</a>
         <a class="text-btn done-btn" href="${viewerUrl}" target="_blank" rel="noopener">Abrir</a>
@@ -2111,6 +2111,33 @@ async function openFile(ref, title) {
   v.addEventListener('click', (e) => { if (e.target === v) closeViewer(); });
   v.querySelector('.doc-close').addEventListener('click', closeViewer);
   document.body.append(v);
+  if (!isImg) renderPdfPages(blob, v.querySelector('.doc-body'));
+}
+// El PDF se dibuja con pdf.js en lienzos, página a página: se ve igual en cualquier navegador
+// (Safari en iPhone no muestra bien los PDF dentro de la página, y la CSP bloquea su visor).
+async function renderPdfPages(blob, box) {
+  try {
+    const lib = await loadPdfJs();
+    const pdf = await lib.getDocument({ data: await blob.arrayBuffer(), isEvalSupported: false }).promise;
+    box.replaceChildren();
+    const width = box.clientWidth || 320;
+    const ratio = Math.min(window.devicePixelRatio || 1, 3);
+    for (let n = 1; n <= pdf.numPages; n++) {
+      if (!box.isConnected) return; // se ha cerrado el visor
+      const page = await pdf.getPage(n);
+      const vp = page.getViewport({ scale: (width / page.getViewport({ scale: 1 }).width) * ratio });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      canvas.className = 'doc-page';
+      canvas.setAttribute('aria-label', `Página ${n} de ${pdf.numPages}`);
+      box.append(canvas);
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    }
+  } catch (e) {
+    console.warn(e);
+    box.innerHTML = '<p class="muted small doc-loading">No se ha podido mostrar el PDF. Usa «Abrir» o «Descargar».</p>';
+  }
 }
 function closeViewer() {
   document.querySelector('.doc-viewer')?.remove();
