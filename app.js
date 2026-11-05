@@ -2954,6 +2954,46 @@ function detectRaiseMonth(p) {
   const years = Object.keys(byYear).map(Number).sort((a, b) => b - a);
   return years.length ? { month: byYear[years[0]], year: years[0] } : null;
 }
+// Pagos anuales que se repiten cada año: el complemento por resultado (12 meses del año anterior
+// más las dos pagas, al % que marca la nómina sobre el sueldo del año anterior) y el reparto de beneficios.
+const RESULT_CODES = ['2142', '214D', '214J'];
+const PROFIT_CODES = ['3170', '2044'];
+function recurKind(k) {
+  const code = k.code?.split(' ').at(-1);
+  if (RESULT_CODES.includes(code) || (!code && /complemento por resultado|compl\.? result/i.test(k.name))) return 'result';
+  if (PROFIT_CODES.includes(code) || (!code && /reparto de beneficios/i.test(k.name))) return 'profit';
+  return null;
+}
+// Sueldo fijo de diciembre (o de la última nómina) de un año
+function fixedAtYearEnd(monthly, y) {
+  const i = monthly.findIndex((s) => s.year === y);
+  return i < 0 ? 0 : fixedOf(monthly, i);
+}
+function recurringPays(p, monthly) {
+  const res = {}; const prof = {};
+  for (const sl of monthly) {
+    for (const k of sl.concepts) {
+      if (k.type !== 'dev') continue;
+      const kind = recurKind(k);
+      if (!kind) continue;
+      const t = kind === 'result' ? res : prof;
+      const h = (t[sl.year] ??= { year: sl.year, month: sl.month, amount: 0, pct: null });
+      h.amount += k.amount;
+      if (kind === 'result' && k.qty && RESULT_CODES[0] === k.code?.split(' ').at(-1)) h.pct = k.qty;
+    }
+  }
+  const last3 = (t) => Object.values(t).sort((a, b) => b.year - a.year).slice(0, 3);
+  const avg = (a) => (a.length ? a.reduce((x, v) => x + v, 0) / a.length : 0);
+  const modeMonth = (h, d) => Number(Object.entries(h.reduce((a, x) => ({ ...a, [x.month]: (a[x.month] || 0) + 1 }), {})).sort((a, b) => b[1] - a[1])[0]?.[0]) || d;
+  const rh = last3(res).map((h) => ({ ...h, amount: round2(h.amount), fixed: fixedAtYearEnd(monthly, h.year - 1) }));
+  // Lo que se cobra de verdad sobre el % de la nómina × 14 × sueldo fijo de diciembre del año anterior (≈ 0,98 en Airbus)
+  const ks = rh.filter((h) => h.pct && h.fixed).map((h) => h.amount / (h.pct / 100 * 14 * h.fixed));
+  const ph = last3(prof).map((h) => ({ ...h, amount: round2(h.amount) }));
+  return {
+    result: rh.length ? { hist: rh, pct: round2(avg(rh.filter((h) => h.pct).map((h) => h.pct))), k: ks.length ? avg(ks) : 1, month: modeMonth(rh, 4), fixedPrev: fixedAtYearEnd(monthly, new Date().getFullYear() - 1) } : null,
+    profit: ph.length ? { hist: ph, amount: round2(avg(ph.map((h) => h.amount))), month: modeMonth(ph, 5) } : null,
+  };
+}
 function projData(p) {
   const monthly = sortSlips(p.slips.filter((s) => s.kind === 'monthly'));
   const last = monthly[0];
@@ -2970,20 +3010,22 @@ function projData(p) {
     const f = fixedOf(monthly, ni);
     if (f > 0) extras[e.month] = { ratio: slipTotals(e).gross / f, from: e };
   }
-  // Pagos puntuales del último año completo (complemento por resultado, reparto de beneficios,
-  // compensaciones…): lo cobrado en las nóminas mensuales por encima del sueldo fijo de cada mes
+  const recur = recurringPays(p, monthly);
+  // Otros pagos puntuales del último año completo (compensaciones…): lo cobrado en las nóminas
+  // mensuales por encima del sueldo fijo de cada mes, sin el complemento por resultado ni el reparto de beneficios
   const py = new Date().getFullYear() - 1;
   const oneOff = { year: py, total: 0, months: {} };
   monthly.forEach((sl, i) => {
     if (sl.year !== py) return;
-    const extra = Math.max(0, slipTotals(sl).gross - fixedOf(monthly, i));
+    const rec = sl.concepts.filter((k) => k.type === 'dev' && recurKind(k)).reduce((a, k) => a + k.amount, 0);
+    const extra = Math.max(0, slipTotals(sl).gross - fixedOf(monthly, i) - rec);
     if (extra > 1) { oneOff.total += extra; oneOff.months[sl.month] = (oneOff.months[sl.month] || 0) + extra; }
   });
   oneOff.total = round2(oneOff.total);
   oneOff.topMonth = Number(Object.entries(oneOff.months).sort((a, b) => b[1] - a[1])[0]?.[0]) || 4;
-  return { last, base: fixedOf(monthly, 0), rates, extras, raise: detectRaiseMonth(p), oneOff };
+  return { last, base: fixedOf(monthly, 0), rates, extras, raise: detectRaiseMonth(p), oneOff, recur };
 }
-const projSettings = (p) => ({ base: null, bonus: 0, bonusMonth: 4, years: {}, ...(p.projSet ?? {}) });
+const projSettings = (p) => ({ base: null, bonus: 0, bonusMonth: 4, resPct: null, resMonth: null, profit: null, profitMonth: null, years: {}, ...(p.projSet ?? {}) });
 function yearCfg(p, D, y) {
   const set = projSettings(p);
   const c = set.years[y] ?? {};
@@ -3004,6 +3046,12 @@ function projCompute(p) {
   const lastM = Math.max(0, ...paidY0.filter((s) => s.kind === 'monthly').map((s) => s.month));
   let base = Number(set.base) > 0 ? Number(set.base) : D.base;
   let bonus = Number(set.bonus) || 0;
+  const R = D.recur.result; const B = D.recur.profit;
+  const resPct = set.resPct ?? R?.pct ?? 0;
+  const resMonth = Number(set.resMonth ?? R?.month ?? 4);
+  const profit = set.profit ?? B?.amount ?? 0;
+  const profitMonth = Number(set.profitMonth ?? B?.month ?? 5);
+  let fixedPrev = R?.fixedPrev || base; // sueldo fijo de diciembre del año anterior (base del complemento)
   const last = [...p.decls].sort((a, b) => b.year - a.year)[0];
   const years = [];
   for (let y = y0; y <= y0 + PROJ_YEARS; y++) {
@@ -3024,12 +3072,17 @@ function projCompute(p) {
       const monthGross = base;
       const ex = D.extras[m] ? D.extras[m].ratio * base : 0;
       const bo = bonus && m === Number(set.bonusMonth) ? bonus : 0;
-      if (m < M || !pct) paidBefore += monthGross + ex + bo;
+      const res = resPct && m === resMonth ? resPct / 100 * (R?.k ?? 1) * 14 * fixedPrev : 0;
+      const pro = profit && m === profitMonth ? Number(profit) : 0;
+      if (m < M || !pct) paidBefore += monthGross + ex; // los atrasos solo son del sueldo y las pagas
       if (m < start) continue;
       months.push({ m, kind: 'monthly', gross: round2(monthGross) });
       if (ex) months.push({ m, kind: 'extra', gross: round2(ex) });
+      if (res) months.push({ m, kind: 'result', gross: round2(res), note: `${numPct(resPct)} × 14 × ${numStr2(fixedPrev)}` });
+      if (pro) months.push({ m, kind: 'profit', gross: round2(pro) });
       if (bo) months.push({ m, kind: 'bonus', gross: round2(bo) });
     }
+    fixedPrev = base;
     const pending = round2(months.reduce((a, x) => a + x.gross, 0));
     const paid = y === y0 ? aggregate(paidY0) : null;
     const gross = round2(pending + (paid?.gross ?? 0));
@@ -3134,7 +3187,7 @@ function renderProj() {
 }
 
 function openProjYear(P, r) {
-  const label = { monthly: 'Nómina', extra: 'Paga extra', bonus: 'Otros pagos anuales', retro: 'Atrasos' };
+  const label = { monthly: 'Nómina', extra: 'Paga extra', result: 'Complemento por resultado', profit: 'Reparto de beneficios', bonus: 'Otros pagos anuales', retro: 'Atrasos' };
   const net = (g) => round2(r.gross ? g * r.net / r.gross : 0); // reparte el neto del año en proporción al bruto
   const back = newSheet();
   back.innerHTML = `
@@ -3164,15 +3217,29 @@ function openProjSettings(p, P) {
   const D = P.D;
   const back = newSheet();
   const num = (v) => (v == null || v === '' ? '' : String(v).replace('.', ','));
+  const R = D.recur.result; const B = D.recur.profit;
+  const resMonth = Number(set.resMonth ?? R?.month ?? 4);
+  const profitMonth = Number(set.profitMonth ?? B?.month ?? 5);
   const extrasTxt = Object.entries(D.extras).map(([m, e]) => `${MONTHS[m - 1]} (${isPrivate() ? MASK : numPct(e.ratio * 100)} del sueldo fijo)`).join(' y ');
   back.innerHTML = `
     <div class="sheet" role="dialog" aria-modal="true" aria-label="Supuestos de la proyección">
       <h2 class="sheet-title">Supuestos</h2>
       <label class="field"><span>Sueldo fijo mensual (bruto)</span><input class="ps-base" inputmode="decimal" placeholder="${formatInput(D.base)}" value="${set.base ? formatInput(Number(set.base)) : ''}"><small class="muted">Vacío: el de tu última nómina, sin atrasos ni pagos puntuales (${money(D.base)})</small></label>
       <p class="muted small">${extrasTxt ? `Pagas extra según tus nóminas: ${extrasTxt}.` : 'No hay pagas extra en tus nóminas.'} ${D.raise ? `Tus subidas suelen llegar en ${MONTHS[D.raise.month - 1]} (atrasos en la nómina de ${MONTHS[D.raise.month - 1]} de ${D.raise.year}).` : ''}</p>
-      ${D.oneOff.total > 0 ? `<p class="muted small ps-hint">En ${D.oneOff.year} cobraste además ${money(D.oneOff.total)} brutos en pagos puntuales (complemento por resultado, reparto de beneficios, compensaciones…), sobre todo en ${MONTHS[D.oneOff.topMonth - 1]}. <button class="link-btn-text ps-use" type="button">Usar como pago anual</button></p>` : ''}
+      <p class="opt-label">Pagos de cada año</p>
       <div class="mrow-fields">
-        <label class="field"><span>Otros pagos anuales (bonus…)</span><input class="ps-bonus" inputmode="decimal" value="${set.bonus ? formatInput(Number(set.bonus)) : ''}" placeholder="0,00"></label>
+        <label class="field"><span>Complemento por resultado (%)</span><input class="ps-res" inputmode="decimal" placeholder="${num(R?.pct ?? 0)}" value="${num(set.resPct)}"></label>
+        <label class="field"><span>Mes del pago</span><select class="ps-res-m">${MONTHS.map((n, i) => `<option value="${i + 1}" ${resMonth === i + 1 ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div>
+      <p class="muted small">${R ? `En tus nóminas: ${R.hist.map((h) => `${h.year}, ${h.pct ? numPct(h.pct) : '—'} (${money(h.amount)})`).join(' · ')}. Vacío: la media (${numPct(R.pct)}). Se cobra el % × 14 sobre el sueldo fijo de diciembre del año anterior, así que crece con las subidas.` : 'No aparece en tus nóminas: pon el % si lo cobras.'}</p>
+      <div class="mrow-fields">
+        <label class="field"><span>Reparto de beneficios (bruto)</span><input class="ps-prof" inputmode="decimal" placeholder="${formatInput(B?.amount ?? 0)}" value="${set.profit != null ? formatInput(Number(set.profit)) : ''}"></label>
+        <label class="field"><span>Mes del pago</span><select class="ps-prof-m">${MONTHS.map((n, i) => `<option value="${i + 1}" ${profitMonth === i + 1 ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div>
+      <p class="muted small">${B ? `En tus nóminas: ${B.hist.map((h) => `${h.year}, ${money(h.amount)}`).join(' · ')}. Vacío: la media (${money(B.amount)}).` : 'No aparece en tus nóminas: pon el importe si lo cobras.'} Pon 0 para no contarlo.</p>
+      ${D.oneOff.total > 0 ? `<p class="muted small ps-hint">En ${D.oneOff.year} cobraste además ${money(D.oneOff.total)} brutos en otros pagos puntuales (compensaciones…), sobre todo en ${MONTHS[D.oneOff.topMonth - 1]}. <button class="link-btn-text ps-use" type="button">Usar como pago anual</button></p>` : ''}
+      <div class="mrow-fields">
+        <label class="field"><span>Otros pagos anuales</span><input class="ps-bonus" inputmode="decimal" value="${set.bonus ? formatInput(Number(set.bonus)) : ''}" placeholder="0,00"></label>
         <label class="field"><span>Mes del pago</span><select class="ps-bonus-m">${MONTHS.map((n, i) => `<option value="${i + 1}" ${Number(set.bonusMonth) === i + 1 ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
       </div>
       <p class="opt-label">Subida de cada año</p>
@@ -3210,7 +3277,9 @@ function openProjSettings(p, P) {
       };
     });
     change(() => {
-      p.projSet = { base: val(q('.ps-base')), bonus: val(q('.ps-bonus')) ?? 0, bonusMonth: Number(q('.ps-bonus-m').value), years };
+      const rm = Number(q('.ps-res-m').value); const pm = Number(q('.ps-prof-m').value);
+      p.projSet = { base: val(q('.ps-base')), bonus: val(q('.ps-bonus')) ?? 0, bonusMonth: Number(q('.ps-bonus-m').value),
+        resPct: val(q('.ps-res')), resMonth: rm === (R?.month ?? 4) ? null : rm, profit: val(q('.ps-prof')), profitMonth: pm === (B?.month ?? 5) ? null : pm, years };
     });
     closeSheet();
     render();
