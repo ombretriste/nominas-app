@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -36,6 +36,7 @@ const ICONS = {
   evolution: '<path d="M4.5 20v-5M9.5 20v-8M14.5 20v-5.5M19.5 20V9"/><path d="M4.5 11l5-4.5 5 3 5-5"/>',
   documents: '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2h7a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   renta: '<path d="M6 3.5h12v17l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3-2 1.3z"/><path d="M9 8h6M9 11.5h6M9 15h3.5"/>',
+  proj: '<path d="M4 19.5h16"/><path d="M5 16l4.5-4 3.5 2.5L19 8"/><path d="M15 8h4v4"/><path d="M5 4.5v15" opacity=".5"/>',
   sim: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8"/><circle cx="9" cy="11.5" r=".9" fill="currentColor"/><circle cx="12" cy="11.5" r=".9" fill="currentColor"/><circle cx="15" cy="11.5" r=".9" fill="currentColor"/><circle cx="9" cy="15" r=".9" fill="currentColor"/><circle cx="12" cy="15" r=".9" fill="currentColor"/><path d="M15 14v3"/><circle cx="9" cy="18" r=".9" fill="currentColor"/><circle cx="12" cy="18" r=".9" fill="currentColor"/>',
   alert: '<path d="M12 3.5L2.5 20h19z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.2" r=".6" fill="currentColor"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -64,6 +65,7 @@ const SCREENS = [
   { key: 'concepts',  label: 'Conceptos',  color: '#34d399' },
   { key: 'evolution', label: 'Evolución',  color: '#22d3ee' },
   { key: 'renta',     label: 'Renta',      color: '#bef264' },
+  { key: 'proj',      label: 'Proyección', color: '#a3e635' },
 ];
 // Pantallas que se abren desde el menú ⋯ (no salen en el Resumen ni en la barra inferior).
 const MENU_SCREENS = [
@@ -840,6 +842,7 @@ function normData(d) {
       certs: (p.certs || []).map(normCert),
       decls: (p.decls || []).map(normDecl),
       sim: p.sim && typeof p.sim === 'object' ? p.sim : {}, // ajustes del simulador de la Renta, por año
+      projSet: p.projSet && typeof p.projSet === 'object' ? p.projSet : {}, // supuestos de la proyección del sueldo
     })),
   };
 }
@@ -1218,6 +1221,7 @@ function render() {
     : screen === 'concepts' ? renderConcepts()
     : screen === 'renta' ? renderRenta()
     : screen === 'sim' ? renderSim()
+    : screen === 'proj' ? renderProj()
     : screen === 'evolution' ? renderEvolution()
     : renderDocuments();
   const dir = navDir;
@@ -1561,6 +1565,7 @@ function renderSummary() {
       return pairs.every((x) => x.ok) ? `<span class="pos small-status">${icon('check', 14)} cuadra</span>` : '<span class="neg small-status">no cuadra</span>';
     })(),
     evolution: '',
+    proj: '',
   };
   const hasAny = allSlips(profiles).length > 0;
   const el = document.createElement('div');
@@ -2902,6 +2907,271 @@ function openSimSettings(p, y) {
       p.sim ??= {};
       p.sim[y] = { ...(p.sim[y] ?? {}), ppExtra: v('s-ppx'), donativos: v('s-don'), dedExtra: v('s-ded'), donRecurrent: back.querySelector('.s-rec').checked,
         gpExtra: v('s-gp'), rcmExtra: v('s-rcm'), retExtra: v('s-ret'), otrosGastos: v('s-og') };
+    });
+    closeSheet();
+    render();
+  });
+}
+
+// ---------- Proyección del sueldo ----------
+// Lo que queda del año en curso y los 5 siguientes, a partir del sueldo fijo de la última nómina.
+// Cada año sube IPC previsto + un variable desde un mes; con atrasos, ese mes cobra además la
+// diferencia acumulada desde enero. IPC por defecto: Banco de España (oct. 2026) para 2026–2027 y
+// el objetivo del BCE (2 %) después. Todo se puede cambiar en «Supuestos».
+const IPC_DEFAULT = { 2026: 3.9, 2027: 3.7 };
+const IPC_LONG = 2.0;
+const PROJ_YEARS = 5;
+const ipcDefault = (y) => IPC_DEFAULT[y] ?? IPC_LONG;
+const mm = (m) => String(m).padStart(2, '0');
+
+// Sueldo fijo a partir de una nómina mensual (índice i en la lista ordenada de más reciente a más
+// antigua): los abonos de ese mismo mes (sin atrasos ni regularizaciones) que se repiten en al menos
+// 2 de las 3 nóminas mensuales hasta esa; así no cuentan pagos puntuales como una compensación o un bonus.
+function fixedOf(monthly, i = 0) {
+  const s = monthly[i];
+  if (!s.concepts.length) return slipTotals(s).gross;
+  const own = (x) => `${mm(x.month)}/${x.year}`;
+  const ownDev = (x) => x.concepts.filter((k) => k.type === 'dev' && (!k.origin || !/^\d{2}\/\d{4}$/.test(k.origin) || k.origin === own(x)));
+  const keyOf = (k) => (k.code ? k.code.split(' ').at(-1) : k.name);
+  const win = monthly.slice(i, i + 3).filter((x) => x.concepts.length);
+  if (win.length < 2) return round2(ownDev(s).reduce((a, k) => a + k.amount, 0));
+  const count = {};
+  win.forEach((x) => new Set(ownDev(x).map(keyOf)).forEach((k) => { count[k] = (count[k] || 0) + 1; }));
+  const amountOf = (key) => { for (const x of win) { const ks = ownDev(x).filter((k) => keyOf(k) === key); if (ks.length) return ks.reduce((a, k) => a + k.amount, 0); } return 0; };
+  return round2(Object.keys(count).filter((k) => count[k] >= 2).reduce((a, k) => a + amountOf(k), 0));
+}
+// Mes en que llegan las subidas: el primero en que una nómina trae atrasos de meses anteriores del mismo año
+function detectRaiseMonth(p) {
+  const found = [];
+  for (const s of p.slips.filter((x) => x.kind === 'monthly' && x.concepts.length)) {
+    const retro = s.concepts.some((k) => k.type === 'dev' && /^(\d{2})\/(\d{4})$/.test(k.origin) && Number(k.origin.slice(3)) === s.year && Number(k.origin.slice(0, 2)) < s.month);
+    if (retro) found.push(s);
+  }
+  const byYear = {};
+  found.forEach((s) => { if (!byYear[s.year] || s.month < byYear[s.year]) byYear[s.year] = s.month; });
+  const years = Object.keys(byYear).map(Number).sort((a, b) => b - a);
+  return years.length ? { month: byYear[years[0]], year: years[0] } : null;
+}
+function projData(p) {
+  const monthly = sortSlips(p.slips.filter((s) => s.kind === 'monthly'));
+  const last = monthly[0];
+  if (!last) return null;
+  const ref = monthly.slice(0, 3).map(slipTotals);
+  const g = ref.reduce((a, t) => a + t.gross, 0);
+  const rates = { ss: g ? ref.reduce((a, t) => a + t.ss, 0) / g : 0, irpf: g ? ref.reduce((a, t) => a + t.irpf, 0) / g : 0 };
+  // Pagas extra: por mes, la más reciente, en proporción al sueldo fijo de entonces
+  const extras = {};
+  for (const e of sortSlips(p.slips.filter((s) => s.kind === 'extra'))) {
+    if (extras[e.month]) continue;
+    let ni = monthly.findIndex((s) => s.year < e.year || (s.year === e.year && s.month <= e.month));
+    if (ni < 0) ni = 0;
+    const f = fixedOf(monthly, ni);
+    if (f > 0) extras[e.month] = { ratio: slipTotals(e).gross / f, from: e };
+  }
+  // Pagos puntuales del último año completo (complemento por resultado, reparto de beneficios,
+  // compensaciones…): lo cobrado en las nóminas mensuales por encima del sueldo fijo de cada mes
+  const py = new Date().getFullYear() - 1;
+  const oneOff = { year: py, total: 0, months: {} };
+  monthly.forEach((sl, i) => {
+    if (sl.year !== py) return;
+    const extra = Math.max(0, slipTotals(sl).gross - fixedOf(monthly, i));
+    if (extra > 1) { oneOff.total += extra; oneOff.months[sl.month] = (oneOff.months[sl.month] || 0) + extra; }
+  });
+  oneOff.total = round2(oneOff.total);
+  oneOff.topMonth = Number(Object.entries(oneOff.months).sort((a, b) => b[1] - a[1])[0]?.[0]) || 4;
+  return { last, base: fixedOf(monthly, 0), rates, extras, raise: detectRaiseMonth(p), oneOff };
+}
+const projSettings = (p) => ({ base: null, bonus: 0, bonusMonth: 4, years: {}, ...(p.projSet ?? {}) });
+function yearCfg(p, D, y) {
+  const set = projSettings(p);
+  const c = set.years[y] ?? {};
+  const y0 = new Date().getFullYear();
+  return {
+    ipc: c.ipc ?? (y === y0 ? 0 : ipcDefault(y)), // el año en curso: su subida ya está en la nómina
+    var: c.var ?? 0,
+    month: c.month ?? D.raise?.month ?? 2,
+    retro: c.retro ?? true,
+  };
+}
+function projCompute(p) {
+  const D = projData(p);
+  if (!D) return null;
+  const set = projSettings(p);
+  const y0 = new Date().getFullYear();
+  const paidY0 = p.slips.filter((s) => s.year === y0);
+  const lastM = Math.max(0, ...paidY0.filter((s) => s.kind === 'monthly').map((s) => s.month));
+  let base = Number(set.base) > 0 ? Number(set.base) : D.base;
+  let bonus = Number(set.bonus) || 0;
+  const last = [...p.decls].sort((a, b) => b.year - a.year)[0];
+  const years = [];
+  for (let y = y0; y <= y0 + PROJ_YEARS; y++) {
+    const cfg = yearCfg(p, D, y);
+    const pct = (cfg.ipc + cfg.var) / 100;
+    const M = Math.min(12, Math.max(1, cfg.month));
+    const start = y === y0 ? lastM + 1 : 1;
+    const months = [];
+    let paidBefore = 0; // cobrado en el año antes de la subida (para los atrasos)
+    for (let m = 1; m <= 12; m++) {
+      if (pct && m === M) {
+        const retro = cfg.retro ? round2(paidBefore * pct) : 0;
+        base = base * (1 + pct);
+        bonus = bonus * (1 + pct);
+        if (m >= start && retro) months.push({ m, kind: 'retro', gross: retro, note: `Atrasos de la subida (ene–${MONTHS_SHORT[m - 2]})` });
+        else if (m < start && retro) months.push({ m, kind: 'retro', gross: 0, note: '' });
+      }
+      const monthGross = base;
+      const ex = D.extras[m] ? D.extras[m].ratio * base : 0;
+      const bo = bonus && m === Number(set.bonusMonth) ? bonus : 0;
+      if (m < M || !pct) paidBefore += monthGross + ex + bo;
+      if (m < start) continue;
+      months.push({ m, kind: 'monthly', gross: round2(monthGross) });
+      if (ex) months.push({ m, kind: 'extra', gross: round2(ex) });
+      if (bo) months.push({ m, kind: 'bonus', gross: round2(bo) });
+    }
+    const pending = round2(months.reduce((a, x) => a + x.gross, 0));
+    const paid = y === y0 ? aggregate(paidY0) : null;
+    const gross = round2(pending + (paid?.gross ?? 0));
+    // Neto: el IRPF del año con las escalas del simulador (estatal + Madrid) y la Seguridad Social al % de las nóminas
+    const ss = gross * D.rates.ss;
+    const irpf = calcRenta({ dinerarias: gross, especie: 0, ppCo: 0, ss, union: 0, otrosGastos: OTROS_GASTOS_TRABAJO, ppPersonal: 0, ppTrab: 0,
+      rcm: 0, gp: 0, perdidasPend: 0, minE: last?.v.minE ?? MIN_PERSONAL.estatal, minA: last?.v.minA ?? MIN_PERSONAL.madrid,
+      donativos: 0, donRecurrent: false, otrasDed: 0, retenciones: 0, divGross: 0, divOrigin: 0 }).cuotaLiq;
+    years.push({ y, cfg, pct, months: months.filter((x) => x.gross), pending, paid: paid?.gross ?? 0, gross, net: round2(gross - ss - irpf), irpf, ss: round2(ss), baseEnd: round2(base) });
+  }
+  return { D, years, y0, lastM, baseNow: Number(set.base) > 0 ? Number(set.base) : D.base };
+}
+
+function renderProj() {
+  const el = document.createElement('div');
+  if (isTotal()) {
+    el.innerHTML = '<section class="hero"><p class="label">Proyección</p><p class="muted small">La proyección es de cada persona: elige una abajo.</p></section>';
+    return el;
+  }
+  const p = currentProfile();
+  const P = projCompute(p);
+  if (!P) {
+    el.innerHTML = '<section class="hero"><p class="label">Proyección</p><p class="muted small">Sube alguna nómina mensual para proyectar tu sueldo.</p></section>';
+    return el;
+  }
+  const { years, y0 } = P;
+  const next = years[1], lastY = years.at(-1);
+  const acum = next ? (lastY.baseEnd / P.baseNow - 1) * 100 : 0;
+  const pctTxt = (v) => (isPrivate() ? MASK : numPct(v));
+  el.innerHTML = `
+    <section class="hero">
+      <p class="label">Sueldo bruto previsto ${next.y}</p>
+      <div class="net-row">
+        <p class="net amount">${money(next.gross)}</p>
+        <button class="icon-btn proj-set" type="button" aria-label="Supuestos de la proyección" title="Supuestos">${icon('pencil', 20)}</button>
+      </div>
+      <p class="muted small">Sueldo fijo mensual ${money(P.baseNow)} (nómina de ${MONTHS[P.D.last.month - 1]} ${P.D.last.year}) · cada año, IPC previsto + variable</p>
+    </section>
+    <section class="summary">
+      <div class="pill"><span class="label">Pendiente ${y0}</span><span class="amount pos">${money(years[0].pending)}</span></div>
+      <div class="pill"><span class="label">Neto ${next.y}</span><span class="amount">${money(next.net)}</span></div>
+      <div class="pill"><span class="label">Bruto ${lastY.y}</span><span class="amount">${money(lastY.gross)}</span></div>
+      <div class="pill"><span class="label">Subida ${next.y}–${lastY.y}</span><span class="amount">${pctTxt(acum)}</span></div>
+    </section>
+    <section class="group hist-chart-wrap"><div class="list hist-chart-box">${evolutionChart(years.map((r) => ({ y: r.y, gross: r.gross, net: r.net, partial: false })))}</div></section>
+    <section class="group">
+      <h2>Por años</h2>
+      <ul class="movs amort hist-list"><li class="mv-year open"><div class="amort-rows">
+        <div class="amort-cols proj-cols"><span>Año</span><span>Subida</span><span>Desde</span><span>Bruto</span><span>Neto</span></div>
+        ${years.map((r) => `
+        <div class="amort-row proj-cols" data-py="${r.y}" role="button" tabindex="0">
+          <span>${r.y}${r.y === y0 ? '¹' : ''}</span>
+          <span>${r.pct ? pctTxt(r.pct * 100) : '—'}</span>
+          <span>${r.pct ? `${MONTHS_SHORT[r.cfg.month - 1]}${r.cfg.retro && r.cfg.month > 1 ? '*' : ''}` : '—'}</span>
+          <span>${numStr2(r.gross)}</span><span>${numStr2(r.net)}</span>
+        </div>`).join('')}
+      </div></li></ul>
+      <p class="muted small amort-note">Toca un año para ver sus meses. ¹ ${y0}: lo cobrado en tus nóminas más lo que falta. * Con atrasos desde enero. Neto estimado con la Seguridad Social al % de tus nóminas y el IRPF de las escalas estatal y de Madrid (sin otras rentas ni deducciones).</p>
+    </section>`;
+  el.querySelector('.proj-set').addEventListener('click', () => openProjSettings(p, P));
+  el.querySelectorAll('[data-py]').forEach((row) => {
+    const open = () => openProjYear(P, P.years.find((r) => r.y === Number(row.dataset.py)));
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+  });
+  return el;
+}
+
+function openProjYear(P, r) {
+  const label = { monthly: 'Nómina', extra: 'Paga extra', bonus: 'Otros pagos anuales', retro: 'Atrasos' };
+  const back = newSheet();
+  back.innerHTML = `
+    <div class="sheet fc-sheet" role="dialog" aria-modal="true" aria-label="Proyección ${r.y}">
+      <h2 class="sheet-title">${r.y} · ${money(r.gross)} brutos</h2>
+      <p class="muted small">${r.pct ? `Subida del ${numPct(r.pct * 100)} (IPC ${numPct(r.cfg.ipc)} + variable ${numPct(r.cfg.var)}) desde ${MONTHS[r.cfg.month - 1]}${r.cfg.retro && r.cfg.month > 1 ? ', con los atrasos desde enero en ese mes' : ''}.` : 'Sin subida este año.'}
+        ${r.paid ? ` Ya cobrado: ${money(r.paid)} brutos en tus nóminas.` : ''}</p>
+      <div class="list fc-table">
+        <div class="amort-cols tipo-cols"><span>Mes</span><span>Concepto</span><span>Bruto</span></div>
+        ${r.months.map((x) => `<div class="amort-row tipo-cols"><span>${MONTHS_SHORT[x.m - 1]}</span><span>${label[x.kind]}${x.note ? `<small class="fc-src">${esc(x.note)}</small>` : ''}</span><span>${numStr2(x.gross)}</span></div>`).join('')}
+        ${r.paid ? `<div class="amort-row tipo-cols"><span>—</span><span>Cobrado en ${r.y}</span><span>${numStr2(r.paid)}</span></div>` : ''}
+        <div class="amort-row tipo-cols fc-total"><span>Total</span><span></span><span>${numStr2(r.gross)}</span></div>
+      </div>
+      <div class="list ts-list">
+        <div class="cat-row"><span class="cat-name">Seguridad Social</span><span class="amount neg">${money(-r.ss)}</span></div>
+        <div class="cat-row"><span class="cat-name">IRPF del año<small class="muted">Escalas estatal y de Madrid, como en el simulador</small></span><span class="amount neg">${money(-r.irpf)}</span></div>
+        <div class="cat-row"><span class="cat-name">Neto estimado</span><span class="amount">${money(r.net)}</span></div>
+      </div>
+      <div class="body-actions"><span></span><button class="text-btn done-btn fc-close" type="button">Cerrar</button></div>
+    </div>`;
+  back.querySelector('.fc-close').addEventListener('click', closeSheet);
+}
+
+function openProjSettings(p, P) {
+  const set = projSettings(p);
+  const D = P.D;
+  const back = newSheet();
+  const num = (v) => (v == null || v === '' ? '' : String(v).replace('.', ','));
+  const extrasTxt = Object.entries(D.extras).map(([m, e]) => `${MONTHS[m - 1]} (${isPrivate() ? MASK : numPct(e.ratio * 100)} del sueldo fijo)`).join(' y ');
+  back.innerHTML = `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Supuestos de la proyección">
+      <h2 class="sheet-title">Supuestos</h2>
+      <label class="field"><span>Sueldo fijo mensual (bruto)</span><input class="ps-base" inputmode="decimal" placeholder="${formatInput(D.base)}" value="${set.base ? formatInput(Number(set.base)) : ''}"><small class="muted">Vacío: el de tu última nómina, sin atrasos ni pagos puntuales (${money(D.base)})</small></label>
+      <p class="muted small">${extrasTxt ? `Pagas extra según tus nóminas: ${extrasTxt}.` : 'No hay pagas extra en tus nóminas.'} ${D.raise ? `Tus subidas suelen llegar en ${MONTHS[D.raise.month - 1]} (atrasos en la nómina de ${MONTHS[D.raise.month - 1]} de ${D.raise.year}).` : ''}</p>
+      ${D.oneOff.total > 0 ? `<p class="muted small ps-hint">En ${D.oneOff.year} cobraste además ${money(D.oneOff.total)} brutos en pagos puntuales (complemento por resultado, reparto de beneficios, compensaciones…), sobre todo en ${MONTHS[D.oneOff.topMonth - 1]}. <button class="link-btn-text ps-use" type="button">Usar como pago anual</button></p>` : ''}
+      <div class="mrow-fields">
+        <label class="field"><span>Otros pagos anuales (bonus…)</span><input class="ps-bonus" inputmode="decimal" value="${set.bonus ? formatInput(Number(set.bonus)) : ''}" placeholder="0,00"></label>
+        <label class="field"><span>Mes del pago</span><select class="ps-bonus-m">${MONTHS.map((n, i) => `<option value="${i + 1}" ${Number(set.bonusMonth) === i + 1 ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div>
+      <p class="opt-label">Subida de cada año</p>
+      <div class="ps-grid">
+        <span class="muted small">Año</span><span class="muted small">IPC %</span><span class="muted small">Variable %</span><span class="muted small">Desde</span><span class="muted small">Atrasos</span>
+        ${P.years.map((r) => { const c = r.cfg; return `
+        <span class="ps-y">${r.y}</span>
+        <input class="ps-ipc" data-y="${r.y}" inputmode="decimal" value="${num(c.ipc)}" aria-label="IPC ${r.y}">
+        <input class="ps-var" data-y="${r.y}" inputmode="decimal" value="${num(c.var)}" aria-label="Variable ${r.y}">
+        <select class="ps-m" data-y="${r.y}" aria-label="Mes de la subida ${r.y}">${MONTHS_SHORT.map((n, i) => `<option value="${i + 1}" ${c.month === i + 1 ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <input class="ps-retro" data-y="${r.y}" type="checkbox" ${c.retro ? 'checked' : ''} aria-label="Atrasos desde enero ${r.y}">`; }).join('')}
+      </div>
+      <p class="muted small">IPC por defecto: previsiones del Banco de España (octubre de 2026: 3,9 % en 2026 y 3,7 % en 2027) y, después, el objetivo del BCE (2 %). ${P.y0} ya está en tu nómina: pon su subida solo si aún falta por llegar. Con «Atrasos», el mes de la subida cobra también la diferencia desde enero.</p>
+      <div class="body-actions">
+        <button class="text-btn ps-reset" type="button">Por defecto</button>
+        <button class="text-btn done-btn ps-save" type="button">Guardar</button>
+      </div>
+    </div>`;
+  const q = (s) => back.querySelector(s);
+  const val = (inp) => (inp.value.trim() === '' ? null : parseAmount(inp.value));
+  q('.ps-reset').addEventListener('click', () => { change(() => { p.projSet = {}; }); closeSheet(); render(); });
+  q('.ps-use')?.addEventListener('click', () => {
+    q('.ps-bonus').value = formatInput(D.oneOff.total);
+    q('.ps-bonus-m').value = String(D.oneOff.topMonth);
+  });
+  q('.ps-save').addEventListener('click', () => {
+    const years = {};
+    back.querySelectorAll('.ps-ipc').forEach((inp) => {
+      const y = Number(inp.dataset.y);
+      years[y] = {
+        ipc: val(inp) ?? 0,
+        var: val(back.querySelector(`.ps-var[data-y="${y}"]`)) ?? 0,
+        month: Number(back.querySelector(`.ps-m[data-y="${y}"]`).value),
+        retro: back.querySelector(`.ps-retro[data-y="${y}"]`).checked,
+      };
+    });
+    change(() => {
+      p.projSet = { base: val(q('.ps-base')), bonus: val(q('.ps-bonus')) ?? 0, bonusMonth: Number(q('.ps-bonus-m').value), years };
     });
     closeSheet();
     render();

@@ -2156,3 +2156,22 @@ body { overflow-x: clip; }
 .doc-zoom { width: 100%; }
 .doc-zoom img, .doc-zoom .doc-page { display: block; width: 100%; height: auto; }
 .doc-zoom .doc-page + .doc-page { border-top: 6px solid #e5e7eb; }
+/* Proyección del sueldo */
+.proj-cols { grid-template-columns: .9fr .9fr .7fr 1.2fr 1.2fr; align-items: center; }
+.proj-cols span:first-child { text-align: left; padding-left: 6px; }
+.amort-row.proj-cols { cursor: pointer; }
+.ps-grid { display: grid; grid-template-columns: .9fr 1fr 1fr 1fr .7fr; gap: 6px 8px; align-items: center; margin: 4px 0 10px; }
+.ps-grid input:not([type=checkbox]), .ps-grid select { width: 100%; min-width: 0; padding: 8px 6px; border-radius: 8px; border: 1px solid var(--line);
+  background: transparent; color: var(--text); font: inherit; font-size: 15px; font-weight: 300; text-align: center; font-variant-numeric: tabular-nums; }
+.ps-grid select { -webkit-appearance: none; appearance: none; }
+.ps-grid input[type=checkbox] { width: 20px; height: 20px; justify-self: center; accent-color: var(--accent); }
+.ps-y { font-weight: 300; }
+.ps-hint .link-btn-text { margin: 0 0 0 4px; padding: 0; display: inline; }
+/* Resumen en móvil con 5 bloques: cuadros y bloques algo más compactos para que todo quepa sin
+   desplazar, también con la barra de perfiles y la franja inferior del iPhone */
+@media (max-width: 699px) {
+  .sum-left .summary { gap: 8px; }
+  .sum-left .pill { padding-top: 10px; padding-bottom: 10px; }
+  .sum-right .block { min-height: 50px; padding-top: 5px; padding-bottom: 5px; }
+  .sum-right .blocks { gap: 5px; }
+}
