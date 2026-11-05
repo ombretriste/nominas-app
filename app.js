@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -3098,6 +3098,7 @@ function renderProj() {
 
 function openProjYear(P, r) {
   const label = { monthly: 'Nómina', extra: 'Paga extra', bonus: 'Otros pagos anuales', retro: 'Atrasos' };
+  const net = (g) => round2(r.gross ? g * r.net / r.gross : 0); // reparte el neto del año en proporción al bruto
   const back = newSheet();
   back.innerHTML = `
     <div class="sheet fc-sheet" role="dialog" aria-modal="true" aria-label="Proyección ${r.y}">
@@ -3105,11 +3106,12 @@ function openProjYear(P, r) {
       <p class="muted small">${r.pct ? `Subida del ${numPct(r.pct * 100)} (IPC ${numPct(r.cfg.ipc)} + variable ${numPct(r.cfg.var)}) desde ${MONTHS[r.cfg.month - 1]}${r.cfg.retro && r.cfg.month > 1 ? ', con los atrasos desde enero en ese mes' : ''}.` : 'Sin subida este año.'}
         ${r.paid ? ` Ya cobrado: ${money(r.paid)} brutos en tus nóminas.` : ''}</p>
       <div class="list fc-table">
-        <div class="amort-cols tipo-cols"><span>Mes</span><span>Concepto</span><span>Bruto</span></div>
-        ${r.months.map((x) => `<div class="amort-row tipo-cols"><span>${MONTHS_SHORT[x.m - 1]}</span><span>${label[x.kind]}${x.note ? `<small class="fc-src">${esc(x.note)}</small>` : ''}</span><span>${numStr2(x.gross)}</span></div>`).join('')}
-        ${r.paid ? `<div class="amort-row tipo-cols"><span>—</span><span>Cobrado en ${r.y}</span><span>${numStr2(r.paid)}</span></div>` : ''}
-        <div class="amort-row tipo-cols fc-total"><span>Total</span><span></span><span>${numStr2(r.gross)}</span></div>
+        <div class="amort-cols proj-mcols"><span>Mes</span><span>Concepto</span><span>Bruto</span><span>Neto</span></div>
+        ${r.months.map((x) => `<div class="amort-row proj-mcols"><span>${MONTHS_SHORT[x.m - 1]}</span><span>${label[x.kind]}${x.note ? `<small class="fc-src">${esc(x.note)}</small>` : ''}</span><span>${numStr2(x.gross)}</span><span>${numStr2(net(x.gross))}</span></div>`).join('')}
+        ${r.paid ? `<div class="amort-row proj-mcols"><span>—</span><span>Cobrado en ${r.y}</span><span>${numStr2(r.paid)}</span><span>${numStr2(net(r.paid))}</span></div>` : ''}
+        <div class="amort-row proj-mcols fc-total"><span>Total</span><span></span><span>${numStr2(r.gross)}</span><span>${numStr2(r.net)}</span></div>
       </div>
+      <p class="muted small">Neto de cada mes: bruto menos Seguridad Social e IRPF al tipo efectivo del año (${isPrivate() ? MASK : numPct(r.gross ? (r.ss + r.irpf) / r.gross * 100 : 0)} en total), para que la suma sea el neto estimado.</p>
       <div class="list ts-list">
         <div class="cat-row"><span class="cat-name">Seguridad Social</span><span class="amount neg">${money(-r.ss)}</span></div>
         <div class="cat-row"><span class="cat-name">IRPF del año<small class="muted">Escalas estatal y de Madrid, como en el simulador</small></span><span class="amount neg">${money(-r.irpf)}</span></div>

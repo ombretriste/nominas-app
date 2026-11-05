@@ -2175,3 +2175,5 @@ body { overflow-x: clip; }
   .sum-right .block { min-height: 50px; padding-top: 5px; padding-bottom: 5px; }
   .sum-right .blocks { gap: 5px; }
 }
+.proj-mcols { grid-template-columns: .55fr 1.7fr 1fr 1fr; align-items: center; }
+.proj-mcols span:first-child, .proj-mcols span:nth-child(2) { text-align: left; }
