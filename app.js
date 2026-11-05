@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -1176,8 +1176,36 @@ function buildTabbar() {
   $('tabbar').querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => go(b.dataset.tab)));
 }
 
+// Nivel de cada pantalla: Resumen 0, pantallas 1, nómina y simulador 2. Cada nivel por encima del
+// Resumen tiene su entrada en el historial, así el gesto de volver del móvil (deslizar desde el borde
+// izquierdo) o el botón atrás del navegador sube un nivel, como en MarketCTRL.
+const navLevel = (s) => (s === 'summary' || s === 'lock' ? 0 : s.startsWith('slip:') || screenByKey[s]?.parent ? 2 : 1);
+const navParent = (s) => (s.startsWith('slip:') ? 'payslips' : screenByKey[s]?.parent ?? 'summary');
+let ignorePop = false;
+function syncHistory(next) {
+  const d = navLevel(next) - navLevel(screen);
+  if (d > 0) for (let l = navLevel(screen) + 1; l <= navLevel(next); l++) history.pushState({ pay: l }, '');
+  else if (d < 0) {
+    const n = Math.min(-d, history.state?.pay ?? 0);
+    if (n > 0) { ignorePop = true; history.go(-n); }
+  }
+}
+window.addEventListener('popstate', () => {
+  if (ignorePop) { ignorePop = false; return; }
+  if (screen === 'lock' || !unlocked) return;
+  const target = history.state?.pay ?? 0;
+  if (navLevel(screen) <= target) return;
+  let t = screen;
+  while (navLevel(t) > target) t = navParent(t);
+  closeSheet();
+  closeViewer();
+  go(t, null, true); // sin animación: el gesto del sistema ya hace la suya
+});
+history.replaceState({ pay: 0 }, '');
+
 // dir: 'forward' (entra desde la derecha) | 'back' (desde la izquierda) | null (sin animación)
-function go(next, dir = null) {
+function go(next, dir = null, fromPop = false) {
+  if (!fromPop) syncHistory(next);
   // De las nóminas (slip:id) no se envía cuál
   if (next !== screen && next !== 'lock') track(`/pantalla/${next.split(':')[0]}`);
   navScrollY = window.scrollY;
@@ -1189,7 +1217,7 @@ function go(next, dir = null) {
 }
 // Volver un nivel: nómina → Nóminas, simulador → Renta, el resto → Resumen.
 function back() {
-  go(screen.startsWith('slip:') ? 'payslips' : screenByKey[screen]?.parent ?? 'summary', 'back');
+  go(navParent(screen), 'back');
 }
 function switchView(id) {
   if (!validView(id) || id === viewId) return;
