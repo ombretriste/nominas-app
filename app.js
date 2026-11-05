@@ -2,7 +2,7 @@
 
 // ---------- Configuración ----------
 // Versión de la app (se ve en la pantalla de inicio). Arreglos y ajustes: 1.0.x; novedades: 1.x.0.
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.10.0';
 // Uso de la app en Vercel Analytics: es una sola página, así que cada función se cuenta como una
 // página virtual. Solo se envía el nombre de la función, nunca datos de la app.
 const track = (path) => { try { window.va?.('pageview', { path }); } catch (_) { /* sin analítica */ } };
@@ -843,6 +843,7 @@ function normData(d) {
       decls: (p.decls || []).map(normDecl),
       sim: p.sim && typeof p.sim === 'object' ? p.sim : {}, // ajustes del simulador de la Renta, por año
       projSet: p.projSet && typeof p.projSet === 'object' ? p.projSet : {}, // supuestos de la proyección del sueldo
+      outlook: p.outlook && typeof p.outlook === 'object' ? p.outlook : null, // previsión que lee UnderCTRL
     })),
   };
 }
@@ -858,6 +859,7 @@ const openYears = new Set([String(new Date().getFullYear())]);
 // ---------- Deshacer ----------
 const undoStack = [];
 function persist() {
+  refreshOutlook();
   save(STORAGE_KEY, data);
   markDirty(); // se sube a la nube si la sincronización está activa
 }
@@ -3041,6 +3043,41 @@ function projCompute(p) {
   return { D, years, y0, lastM, baseNow: Number(set.base) > 0 ? Number(set.base) : D.base };
 }
 
+// Previsión que lee UnderCTRL (con su vínculo) para sus proyecciones: el neto previsto de cada mes
+// pendiente (el de la Proyección, repartido como en el detalle de cada año) y el resultado de la
+// Renta del año pasado y del actual (la presentada si la hay; si no, la simulación).
+function outlookOf(p) {
+  const months = {};
+  const P = projCompute(p);
+  for (const r of P?.years ?? []) {
+    const k = r.gross ? r.net / r.gross : 0;
+    for (const x of r.months) {
+      const ym = `${r.y}-${String(x.m).padStart(2, '0')}`;
+      months[ym] = round2((months[ym] || 0) + x.gross * k);
+    }
+  }
+  const y0 = new Date().getFullYear();
+  const rentas = [];
+  for (const y of [y0 - 1, y0]) {
+    const d = p.decls.find((x) => x.year === y && !x.draft);
+    if (d) { if (d.v.result != null) rentas.push({ year: y, result: round2(d.v.result), filed: true }); continue; }
+    if (!p.slips.some((s) => s.year === y)) continue;
+    rentas.push({ year: y, result: round2(calcRenta(simInputs(p, y).x).result), filed: false });
+  }
+  return { months, rentas };
+}
+// Se recalcula al guardar y al traer datos de UnderCTRL; la fecha solo cambia si cambia algo.
+function refreshOutlook() {
+  let changed = false;
+  for (const p of data.profiles) {
+    let o;
+    try { o = outlookOf(p); } catch (err) { console.warn(err); continue; }
+    const same = p.outlook && JSON.stringify({ months: p.outlook.months, rentas: p.outlook.rentas }) === JSON.stringify(o);
+    if (!same) { p.outlook = { at: Date.now(), ...o }; changed = true; }
+  }
+  return changed;
+}
+
 function renderProj() {
   const el = document.createElement('div');
   if (isTotal()) {
@@ -3818,6 +3855,7 @@ async function refreshLink({ interactive = false } = {}) {
     linkData = { at: Date.now(), people: out.blob ? extractFinance(await decryptWith(link.key, out.blob)) : {} };
     save(LINK_DATA_KEY, linkData);
     linkError = '';
+    if (refreshOutlook()) persist(); // la Renta simulada usa estos datos
     if (unlocked && screen === 'sim') render();
     return true;
   } catch (err) {
